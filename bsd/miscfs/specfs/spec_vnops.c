@@ -2,7 +2,7 @@
  * Copyright (c) 2000-2016 Apple Computer, Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
- * 
+ *
  * This file contains Original Code and/or Modifications of Original Code
  * as defined in and that are subject to the Apple Public Source License
  * Version 2.0 (the 'License'). You may not use this file except in
@@ -11,10 +11,10 @@
  * unlawful or unlicensed copies of an Apple operating system, or to
  * circumvent, violate, or enable the circumvention or violation of, any
  * terms of an Apple operating system software license agreement.
- * 
+ *
  * Please obtain a copy of the License at
  * http://www.opensource.apple.com/apsl/ and read it before using this file.
- * 
+ *
  * The Original Code and all software distributed under the License are
  * distributed on an 'AS IS' basis, WITHOUT WARRANTY OF ANY KIND, EITHER
  * EXPRESS OR IMPLIED, AND APPLE HEREBY DISCLAIMS ALL SUCH WARRANTIES,
@@ -22,7 +22,7 @@
  * FITNESS FOR A PARTICULAR PURPOSE, QUIET ENJOYMENT OR NON-INFRINGEMENT.
  * Please see the License for the specific language governing rights and
  * limitations under the License.
- * 
+ *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_END@
  */
 /* Copyright (c) 1995 NeXT Computer, Inc. All Rights Reserved */
@@ -61,168 +61,163 @@
  *	@(#)spec_vnops.c	8.14 (Berkeley) 5/21/95
  */
 
-#include <sys/param.h>
-#include <sys/proc_internal.h>
-#include <sys/kauth.h>
-#include <sys/systm.h>
-#include <sys/kernel.h>
-#include <sys/conf.h>
-#include <sys/buf_internal.h>
-#include <sys/mount_internal.h>
-#include <sys/vnode_internal.h>
-#include <sys/file_internal.h>
-#include <sys/namei.h>
-#include <sys/stat.h>
-#include <sys/errno.h>
-#include <sys/ioctl.h>
-#include <sys/file.h>
-#include <sys/user.h>
-#include <sys/malloc.h>
-#include <sys/disk.h>
-#include <sys/uio_internal.h>
-#include <sys/resource.h>
 #include <machine/machine_routines.h>
 #include <miscfs/specfs/specdev.h>
-#include <vfs/vfs_support.h>
+#include <sys/buf_internal.h>
+#include <sys/conf.h>
+#include <sys/disk.h>
+#include <sys/errno.h>
+#include <sys/file.h>
+#include <sys/file_internal.h>
+#include <sys/ioctl.h>
+#include <sys/kauth.h>
+#include <sys/kernel.h>
+#include <sys/malloc.h>
+#include <sys/mount_internal.h>
+#include <sys/namei.h>
+#include <sys/param.h>
+#include <sys/proc_internal.h>
+#include <sys/resource.h>
+#include <sys/stat.h>
+#include <sys/systm.h>
+#include <sys/uio_internal.h>
+#include <sys/user.h>
+#include <sys/vnode_internal.h>
 #include <vfs/vfs_disk_conditioner.h>
+#include <vfs/vfs_support.h>
 
 #include <kern/assert.h>
-#include <kern/task.h>
-#include <kern/sched_prim.h>
-#include <kern/thread.h>
 #include <kern/policy_internal.h>
+#include <kern/sched_prim.h>
+#include <kern/task.h>
+#include <kern/thread.h>
 #include <kern/timer_call.h>
 #include <kern/waitq.h>
 
 #include <pexpert/pexpert.h>
 
-#include <sys/kdebug.h>
 #include <libkern/section_keywords.h>
+#include <sys/kdebug.h>
 
 /* XXX following three prototypes should be in a header file somewhere */
-extern dev_t	chrtoblk(dev_t dev);
-extern boolean_t	iskmemdev(dev_t dev);
-extern int	bpfkqfilter(dev_t dev, struct knote *kn);
+extern dev_t chrtoblk(dev_t dev);
+extern boolean_t iskmemdev(dev_t dev);
+extern int bpfkqfilter(dev_t dev, struct knote * kn);
 extern int ptsd_kqfilter(dev_t, struct knote *);
 extern int ptmx_kqfilter(dev_t, struct knote *);
 
-struct vnode *speclisth[SPECHSZ];
+struct vnode * speclisth[SPECHSZ];
 
 /* symbolic sleep message strings for devices */
-char	devopn[] = "devopn";
-char	devio[] = "devio";
-char	devwait[] = "devwait";
-char	devin[] = "devin";
-char	devout[] = "devout";
-char	devioc[] = "devioc";
-char	devcls[] = "devcls";
+char devopn[]  = "devopn";
+char devio[]   = "devio";
+char devwait[] = "devwait";
+char devin[]   = "devin";
+char devout[]  = "devout";
+char devioc[]  = "devioc";
+char devcls[]  = "devcls";
 
 #define VOPFUNC int (*)(void *)
 
 int (**spec_vnodeop_p)(void *);
-struct vnodeopv_entry_desc spec_vnodeop_entries[] = {
-	{ &vnop_default_desc, (VOPFUNC)vn_default_error },
-	{ &vnop_lookup_desc, (VOPFUNC)spec_lookup },		/* lookup */
-	{ &vnop_create_desc, (VOPFUNC)err_create },		/* create */
-	{ &vnop_mknod_desc, (VOPFUNC)err_mknod },		/* mknod */
-	{ &vnop_open_desc, (VOPFUNC)spec_open },			/* open */
-	{ &vnop_close_desc, (VOPFUNC)spec_close },		/* close */
-	{ &vnop_access_desc, (VOPFUNC)spec_access },		/* access */
-	{ &vnop_getattr_desc, (VOPFUNC)spec_getattr },		/* getattr */
-	{ &vnop_setattr_desc, (VOPFUNC)spec_setattr },		/* setattr */
-	{ &vnop_read_desc, (VOPFUNC)spec_read },			/* read */
-	{ &vnop_write_desc, (VOPFUNC)spec_write },		/* write */
-	{ &vnop_ioctl_desc, (VOPFUNC)spec_ioctl },		/* ioctl */
-	{ &vnop_select_desc, (VOPFUNC)spec_select },		/* select */
-	{ &vnop_revoke_desc, (VOPFUNC)nop_revoke },		/* revoke */
-	{ &vnop_mmap_desc, (VOPFUNC)err_mmap },			/* mmap */
-	{ &vnop_fsync_desc, (VOPFUNC)spec_fsync },		/* fsync */
-	{ &vnop_remove_desc, (VOPFUNC)err_remove },		/* remove */
-	{ &vnop_link_desc, (VOPFUNC)err_link },			/* link */
-	{ &vnop_rename_desc, (VOPFUNC)err_rename },		/* rename */
-	{ &vnop_mkdir_desc, (VOPFUNC)err_mkdir },		/* mkdir */
-	{ &vnop_rmdir_desc, (VOPFUNC)err_rmdir },		/* rmdir */
-	{ &vnop_symlink_desc, (VOPFUNC)err_symlink },		/* symlink */
-	{ &vnop_readdir_desc, (VOPFUNC)err_readdir },		/* readdir */
-	{ &vnop_readlink_desc, (VOPFUNC)err_readlink },		/* readlink */
-	{ &vnop_inactive_desc, (VOPFUNC)nop_inactive },		/* inactive */
-	{ &vnop_reclaim_desc, (VOPFUNC)nop_reclaim },		/* reclaim */
-	{ &vnop_strategy_desc, (VOPFUNC)spec_strategy },		/* strategy */
-	{ &vnop_pathconf_desc, (VOPFUNC)spec_pathconf },		/* pathconf */
-	{ &vnop_advlock_desc, (VOPFUNC)err_advlock },		/* advlock */
-	{ &vnop_bwrite_desc, (VOPFUNC)spec_bwrite },		/* bwrite */
-	{ &vnop_pagein_desc, (VOPFUNC)err_pagein },		/* Pagein */
-	{ &vnop_pageout_desc, (VOPFUNC)err_pageout },		/* Pageout */
-        { &vnop_copyfile_desc, (VOPFUNC)err_copyfile },		/* Copyfile */
-	{ &vnop_blktooff_desc, (VOPFUNC)spec_blktooff },		/* blktooff */
-	{ &vnop_offtoblk_desc, (VOPFUNC)spec_offtoblk },		/* offtoblk */
-	{ &vnop_blockmap_desc, (VOPFUNC)spec_blockmap },		/* blockmap */
-	{ (struct vnodeop_desc*)NULL, (int(*)(void *))NULL }
-};
-struct vnodeopv_desc spec_vnodeop_opv_desc =
-	{ &spec_vnodeop_p, spec_vnodeop_entries };
-
+struct vnodeopv_entry_desc spec_vnodeop_entries[] = {{&vnop_default_desc, (VOPFUNC)vn_default_error},
+                                                     {&vnop_lookup_desc, (VOPFUNC)spec_lookup},     /* lookup */
+                                                     {&vnop_create_desc, (VOPFUNC)err_create},      /* create */
+                                                     {&vnop_mknod_desc, (VOPFUNC)err_mknod},        /* mknod */
+                                                     {&vnop_open_desc, (VOPFUNC)spec_open},         /* open */
+                                                     {&vnop_close_desc, (VOPFUNC)spec_close},       /* close */
+                                                     {&vnop_access_desc, (VOPFUNC)spec_access},     /* access */
+                                                     {&vnop_getattr_desc, (VOPFUNC)spec_getattr},   /* getattr */
+                                                     {&vnop_setattr_desc, (VOPFUNC)spec_setattr},   /* setattr */
+                                                     {&vnop_read_desc, (VOPFUNC)spec_read},         /* read */
+                                                     {&vnop_write_desc, (VOPFUNC)spec_write},       /* write */
+                                                     {&vnop_ioctl_desc, (VOPFUNC)spec_ioctl},       /* ioctl */
+                                                     {&vnop_select_desc, (VOPFUNC)spec_select},     /* select */
+                                                     {&vnop_revoke_desc, (VOPFUNC)nop_revoke},      /* revoke */
+                                                     {&vnop_mmap_desc, (VOPFUNC)err_mmap},          /* mmap */
+                                                     {&vnop_fsync_desc, (VOPFUNC)spec_fsync},       /* fsync */
+                                                     {&vnop_remove_desc, (VOPFUNC)err_remove},      /* remove */
+                                                     {&vnop_link_desc, (VOPFUNC)err_link},          /* link */
+                                                     {&vnop_rename_desc, (VOPFUNC)err_rename},      /* rename */
+                                                     {&vnop_mkdir_desc, (VOPFUNC)err_mkdir},        /* mkdir */
+                                                     {&vnop_rmdir_desc, (VOPFUNC)err_rmdir},        /* rmdir */
+                                                     {&vnop_symlink_desc, (VOPFUNC)err_symlink},    /* symlink */
+                                                     {&vnop_readdir_desc, (VOPFUNC)err_readdir},    /* readdir */
+                                                     {&vnop_readlink_desc, (VOPFUNC)err_readlink},  /* readlink */
+                                                     {&vnop_inactive_desc, (VOPFUNC)nop_inactive},  /* inactive */
+                                                     {&vnop_reclaim_desc, (VOPFUNC)nop_reclaim},    /* reclaim */
+                                                     {&vnop_strategy_desc, (VOPFUNC)spec_strategy}, /* strategy */
+                                                     {&vnop_pathconf_desc, (VOPFUNC)spec_pathconf}, /* pathconf */
+                                                     {&vnop_advlock_desc, (VOPFUNC)err_advlock},    /* advlock */
+                                                     {&vnop_bwrite_desc, (VOPFUNC)spec_bwrite},     /* bwrite */
+                                                     {&vnop_pagein_desc, (VOPFUNC)err_pagein},      /* Pagein */
+                                                     {&vnop_pageout_desc, (VOPFUNC)err_pageout},    /* Pageout */
+                                                     {&vnop_copyfile_desc, (VOPFUNC)err_copyfile},  /* Copyfile */
+                                                     {&vnop_blktooff_desc, (VOPFUNC)spec_blktooff}, /* blktooff */
+                                                     {&vnop_offtoblk_desc, (VOPFUNC)spec_offtoblk}, /* offtoblk */
+                                                     {&vnop_blockmap_desc, (VOPFUNC)spec_blockmap}, /* blockmap */
+                                                     {(struct vnodeop_desc *)NULL, (int (*)(void *))NULL}};
+struct vnodeopv_desc spec_vnodeop_opv_desc        = {&spec_vnodeop_p, spec_vnodeop_entries};
 
 static void set_blocksize(vnode_t, dev_t);
 
-#define LOWPRI_TIER1_WINDOW_MSECS	  25
-#define LOWPRI_TIER2_WINDOW_MSECS	  100
-#define LOWPRI_TIER3_WINDOW_MSECS	  500
+#define LOWPRI_TIER1_WINDOW_MSECS 25
+#define LOWPRI_TIER2_WINDOW_MSECS 100
+#define LOWPRI_TIER3_WINDOW_MSECS 500
 
-#define LOWPRI_TIER1_IO_PERIOD_MSECS	  40
-#define LOWPRI_TIER2_IO_PERIOD_MSECS	  85
-#define LOWPRI_TIER3_IO_PERIOD_MSECS	  200
+#define LOWPRI_TIER1_IO_PERIOD_MSECS 40
+#define LOWPRI_TIER2_IO_PERIOD_MSECS 85
+#define LOWPRI_TIER3_IO_PERIOD_MSECS 200
 
-#define LOWPRI_TIER1_IO_PERIOD_SSD_MSECS  5
-#define LOWPRI_TIER2_IO_PERIOD_SSD_MSECS  15
-#define LOWPRI_TIER3_IO_PERIOD_SSD_MSECS  25
+#define LOWPRI_TIER1_IO_PERIOD_SSD_MSECS 5
+#define LOWPRI_TIER2_IO_PERIOD_SSD_MSECS 15
+#define LOWPRI_TIER3_IO_PERIOD_SSD_MSECS 25
 
-
-int	throttle_windows_msecs[THROTTLE_LEVEL_END + 1] = {
-	0,
-	LOWPRI_TIER1_WINDOW_MSECS,
-	LOWPRI_TIER2_WINDOW_MSECS,
-	LOWPRI_TIER3_WINDOW_MSECS,
+int throttle_windows_msecs[THROTTLE_LEVEL_END + 1] = {
+    0,
+    LOWPRI_TIER1_WINDOW_MSECS,
+    LOWPRI_TIER2_WINDOW_MSECS,
+    LOWPRI_TIER3_WINDOW_MSECS,
 };
 
-int	throttle_io_period_msecs[THROTTLE_LEVEL_END + 1] = {
-	0,
-	LOWPRI_TIER1_IO_PERIOD_MSECS,
-	LOWPRI_TIER2_IO_PERIOD_MSECS,
-	LOWPRI_TIER3_IO_PERIOD_MSECS,
+int throttle_io_period_msecs[THROTTLE_LEVEL_END + 1] = {
+    0,
+    LOWPRI_TIER1_IO_PERIOD_MSECS,
+    LOWPRI_TIER2_IO_PERIOD_MSECS,
+    LOWPRI_TIER3_IO_PERIOD_MSECS,
 };
 
-int	throttle_io_period_ssd_msecs[THROTTLE_LEVEL_END + 1] = {
-	0,
-	LOWPRI_TIER1_IO_PERIOD_SSD_MSECS,
-	LOWPRI_TIER2_IO_PERIOD_SSD_MSECS,
-	LOWPRI_TIER3_IO_PERIOD_SSD_MSECS,
+int throttle_io_period_ssd_msecs[THROTTLE_LEVEL_END + 1] = {
+    0,
+    LOWPRI_TIER1_IO_PERIOD_SSD_MSECS,
+    LOWPRI_TIER2_IO_PERIOD_SSD_MSECS,
+    LOWPRI_TIER3_IO_PERIOD_SSD_MSECS,
 };
 
-
-int	throttled_count[THROTTLE_LEVEL_END + 1];
+int throttled_count[THROTTLE_LEVEL_END + 1];
 
 struct _throttle_io_info_t {
-        lck_mtx_t       throttle_lock;
+	lck_mtx_t throttle_lock;
 
-	struct timeval	throttle_last_write_timestamp;
-	struct timeval	throttle_min_timer_deadline;
-	struct timeval	throttle_window_start_timestamp[THROTTLE_LEVEL_END + 1]; /* window starts at both the beginning and completion of an I/O */
-	struct timeval	throttle_last_IO_timestamp[THROTTLE_LEVEL_END + 1];
-	pid_t 		throttle_last_IO_pid[THROTTLE_LEVEL_END + 1];
-	struct timeval	throttle_start_IO_period_timestamp[THROTTLE_LEVEL_END + 1];
+	struct timeval throttle_last_write_timestamp;
+	struct timeval throttle_min_timer_deadline;
+	struct timeval
+	    throttle_window_start_timestamp[THROTTLE_LEVEL_END + 1]; /* window starts at both the beginning and completion of an I/O */
+	struct timeval throttle_last_IO_timestamp[THROTTLE_LEVEL_END + 1];
+	pid_t throttle_last_IO_pid[THROTTLE_LEVEL_END + 1];
+	struct timeval throttle_start_IO_period_timestamp[THROTTLE_LEVEL_END + 1];
 	int32_t throttle_inflight_count[THROTTLE_LEVEL_END + 1];
 
-	TAILQ_HEAD( , uthread) throttle_uthlist[THROTTLE_LEVEL_END + 1]; 	/* Lists of throttled uthreads */
-	int		throttle_next_wake_level;
+	TAILQ_HEAD(, uthread) throttle_uthlist[THROTTLE_LEVEL_END + 1]; /* Lists of throttled uthreads */
+	int throttle_next_wake_level;
 
-        thread_call_t   throttle_timer_call;
-        int32_t throttle_timer_ref;
-        int32_t throttle_timer_active;
+	thread_call_t throttle_timer_call;
+	int32_t throttle_timer_ref;
+	int32_t throttle_timer_active;
 
-        int32_t throttle_io_count;
-        int32_t throttle_io_count_begin;
-        int    *throttle_io_periods;
+	int32_t throttle_io_count;
+	int32_t throttle_io_count_begin;
+	int * throttle_io_periods;
 	uint32_t throttle_io_period_num;
 
 	int32_t throttle_refcnt;
@@ -233,12 +228,11 @@ struct _throttle_io_info_t {
 
 struct _throttle_io_info_t _throttle_io_info[LOWPRI_MAX_NUM_DEV];
 
+int lowpri_throttle_enabled = 1;
 
-int	lowpri_throttle_enabled = 1;
-
-
-static void throttle_info_end_io_internal(struct _throttle_io_info_t *info, int throttle_level);
-static int throttle_info_update_internal(struct _throttle_io_info_t *info, uthread_t ut, int flags, boolean_t isssd, boolean_t inflight, struct bufattr *bap);
+static void throttle_info_end_io_internal(struct _throttle_io_info_t * info, int throttle_level);
+static int throttle_info_update_internal(
+    struct _throttle_io_info_t * info, uthread_t ut, int flags, boolean_t isssd, boolean_t inflight, struct bufattr * bap);
 static int throttle_get_thread_throttle_level(uthread_t ut);
 static int throttle_get_thread_throttle_level_internal(uthread_t ut, int io_tier);
 void throttle_info_mount_reset_period(mount_t mp, int isssd);
@@ -247,37 +241,34 @@ void throttle_info_mount_reset_period(mount_t mp, int isssd);
  * Trivial lookup routine that always fails.
  */
 int
-spec_lookup(struct vnop_lookup_args *ap)
+spec_lookup(struct vnop_lookup_args * ap)
 {
-
 	*ap->a_vpp = NULL;
 	return (ENOTDIR);
 }
 
 static void
-set_blocksize(struct vnode *vp, dev_t dev)
+set_blocksize(struct vnode * vp, dev_t dev)
 {
-    int (*size)(dev_t);
-    int rsize;
+	int (*size)(dev_t);
+	int rsize;
 
-    if ((major(dev) < nblkdev) && (size = bdevsw[major(dev)].d_psize)) {
-        rsize = (*size)(dev);
-	if (rsize <= 0)        /* did size fail? */
-	    vp->v_specsize = DEV_BSIZE;
-	else
-	    vp->v_specsize = rsize;
-    }
-    else
-	    vp->v_specsize = DEV_BSIZE;
+	if ((major(dev) < nblkdev) && (size = bdevsw[major(dev)].d_psize)) {
+		rsize = (*size)(dev);
+		if (rsize <= 0) /* did size fail? */
+			vp->v_specsize = DEV_BSIZE;
+		else
+			vp->v_specsize = rsize;
+	} else
+		vp->v_specsize = DEV_BSIZE;
 }
 
 void
-set_fsblocksize(struct vnode *vp)
+set_fsblocksize(struct vnode * vp)
 {
-	
 	if (vp->v_type == VBLK) {
 		dev_t dev = (dev_t)vp->v_rdev;
-		int maj = major(dev);
+		int maj   = major(dev);
 
 		if ((u_int)maj >= (u_int)nblkdev)
 			return;
@@ -286,19 +277,17 @@ set_fsblocksize(struct vnode *vp)
 		set_blocksize(vp, dev);
 		vnode_unlock(vp);
 	}
-
 }
-
 
 /*
  * Open a special file.
  */
 int
-spec_open(struct vnop_open_args *ap)
+spec_open(struct vnop_open_args * ap)
 {
-	struct proc *p = vfs_context_proc(ap->a_context);
+	struct proc * p   = vfs_context_proc(ap->a_context);
 	kauth_cred_t cred = vfs_context_ucred(ap->a_context);
-	struct vnode *vp = ap->a_vp;
+	struct vnode * vp = ap->a_vp;
 	dev_t bdev, dev = (dev_t)vp->v_rdev;
 	int maj = major(dev);
 	int error;
@@ -310,7 +299,6 @@ spec_open(struct vnop_open_args *ap)
 		return (ENXIO);
 
 	switch (vp->v_type) {
-
 	case VCHR:
 		if ((u_int)maj >= (u_int)nchrdev)
 			return (ENXIO);
@@ -346,14 +334,12 @@ spec_open(struct vnop_open_args *ap)
 		devsw_unlock(dev, S_IFCHR);
 
 		if (error == 0 && cdevsw[maj].d_type == D_DISK && !vp->v_un.vu_specinfo->si_initted) {
-			int	isssd = 0;
+			int isssd              = 0;
 			uint64_t throttle_mask = 0;
-			uint32_t devbsdunit = 0;
+			uint32_t devbsdunit    = 0;
 
 			if (VNOP_IOCTL(vp, DKIOCGETTHROTTLEMASK, (caddr_t)&throttle_mask, 0, NULL) == 0) {
-				
-				if (throttle_mask != 0 &&
-				    VNOP_IOCTL(vp, DKIOCISSOLIDSTATE, (caddr_t)&isssd, 0, ap->a_context) == 0) {
+				if (throttle_mask != 0 && VNOP_IOCTL(vp, DKIOCISSOLIDSTATE, (caddr_t)&isssd, 0, ap->a_context) == 0) {
 					/*
 					 * as a reasonable approximation, only use the lowest bit of the mask
 					 * to generate a disk unit number
@@ -361,12 +347,12 @@ spec_open(struct vnop_open_args *ap)
 					devbsdunit = num_trailing_0(throttle_mask);
 
 					vnode_lock(vp);
-					
-					vp->v_un.vu_specinfo->si_isssd = isssd;
-					vp->v_un.vu_specinfo->si_devbsdunit = devbsdunit;
+
+					vp->v_un.vu_specinfo->si_isssd         = isssd;
+					vp->v_un.vu_specinfo->si_devbsdunit    = devbsdunit;
 					vp->v_un.vu_specinfo->si_throttle_mask = throttle_mask;
-					vp->v_un.vu_specinfo->si_throttleable = 1;
-					vp->v_un.vu_specinfo->si_initted = 1;
+					vp->v_un.vu_specinfo->si_throttleable  = 1;
+					vp->v_un.vu_specinfo->si_initted       = 1;
 
 					vnode_unlock(vp);
 				}
@@ -386,14 +372,13 @@ spec_open(struct vnop_open_args *ap)
 		 * When running in very secure mode, do not allow
 		 * opens for writing of any disk block devices.
 		 */
-		if (securelevel >= 2 && cred != FSCRED &&
-		    (ap->a_mode & FWRITE) && bdevsw[maj].d_type == D_DISK)
+		if (securelevel >= 2 && cred != FSCRED && (ap->a_mode & FWRITE) && bdevsw[maj].d_type == D_DISK)
 			return (EPERM);
 		/*
 		 * Do not allow opens of block devices that are
 		 * currently mounted.
 		 */
-		if ( (error = vfs_mountedon(vp)) )
+		if ((error = vfs_mountedon(vp)))
 			return (error);
 
 		devsw_lock(dev, S_IFBLK);
@@ -404,45 +389,42 @@ spec_open(struct vnop_open_args *ap)
 		devsw_unlock(dev, S_IFBLK);
 
 		if (!error) {
-		    u_int64_t blkcnt;
-		    u_int32_t blksize;
-			int setsize = 0;
+			u_int64_t blkcnt;
+			u_int32_t blksize;
+			int setsize       = 0;
 			u_int32_t size512 = 512;
 
-
-		    if (!VNOP_IOCTL(vp, DKIOCGETBLOCKSIZE, (caddr_t)&blksize, 0, ap->a_context)) {
+			if (!VNOP_IOCTL(vp, DKIOCGETBLOCKSIZE, (caddr_t)&blksize, 0, ap->a_context)) {
 				/* Switch to 512 byte sectors (temporarily) */
 
 				if (!VNOP_IOCTL(vp, DKIOCSETBLOCKSIZE, (caddr_t)&size512, FWRITE, ap->a_context)) {
-			    	/* Get the number of 512 byte physical blocks. */
-			    	if (!VNOP_IOCTL(vp, DKIOCGETBLOCKCOUNT, (caddr_t)&blkcnt, 0, ap->a_context)) {
+					/* Get the number of 512 byte physical blocks. */
+					if (!VNOP_IOCTL(vp, DKIOCGETBLOCKCOUNT, (caddr_t)&blkcnt, 0, ap->a_context)) {
 						setsize = 1;
-			    	}
+					}
 				}
 				/* If it doesn't set back, we can't recover */
 				if (VNOP_IOCTL(vp, DKIOCSETBLOCKSIZE, (caddr_t)&blksize, FWRITE, ap->a_context))
-			    	error = ENXIO;
-		    }
-
+					error = ENXIO;
+			}
 
 			vnode_lock(vp);
-		    set_blocksize(vp, dev);
+			set_blocksize(vp, dev);
 
-		    /*
-		     * Cache the size in bytes of the block device for later
-		     * use by spec_write().
-		     */
+			/*
+			 * Cache the size in bytes of the block device for later
+			 * use by spec_write().
+			 */
 			if (setsize)
 				vp->v_specdevsize = blkcnt * (u_int64_t)size512;
 			else
-		    	vp->v_specdevsize = (u_int64_t)0;	/* Default: Can't get */
-			
-			vnode_unlock(vp);
+				vp->v_specdevsize = (u_int64_t)0; /* Default: Can't get */
 
+			vnode_unlock(vp);
 		}
-		return(error);
+		return (error);
 	default:
-	        panic("spec_open type");
+		panic("spec_open type");
 	}
 	return (0);
 }
@@ -451,14 +433,14 @@ spec_open(struct vnop_open_args *ap)
  * Vnode op for read
  */
 int
-spec_read(struct vnop_read_args *ap)
+spec_read(struct vnop_read_args * ap)
 {
-	struct vnode *vp = ap->a_vp;
-	struct uio *uio = ap->a_uio;
-	struct buf *bp;
+	struct vnode * vp = ap->a_vp;
+	struct uio * uio  = ap->a_uio;
+	struct buf * bp;
 	daddr64_t bn, nextbn;
 	long bsize, bscale;
-	int devBlockSize=0;
+	int devBlockSize = 0;
 	int n, on;
 	int error = 0;
 	dev_t dev;
@@ -473,24 +455,22 @@ spec_read(struct vnop_read_args *ap)
 		return (0);
 
 	switch (vp->v_type) {
-
-	case VCHR:
-		{
-			struct _throttle_io_info_t *throttle_info = NULL;
-			int thread_throttle_level;
-                if (cdevsw[major(vp->v_rdev)].d_type == D_DISK && vp->v_un.vu_specinfo->si_throttleable) {
+	case VCHR: {
+		struct _throttle_io_info_t * throttle_info = NULL;
+		int thread_throttle_level;
+		if (cdevsw[major(vp->v_rdev)].d_type == D_DISK && vp->v_un.vu_specinfo->si_throttleable) {
 			throttle_info = &_throttle_io_info[vp->v_un.vu_specinfo->si_devbsdunit];
-				thread_throttle_level = throttle_info_update_internal(throttle_info, NULL, 0, vp->v_un.vu_specinfo->si_isssd, TRUE, NULL);
-                }
-		error = (*cdevsw[major(vp->v_rdev)].d_read)
-			(vp->v_rdev, uio, ap->a_ioflag);
+			thread_throttle_level =
+			    throttle_info_update_internal(throttle_info, NULL, 0, vp->v_un.vu_specinfo->si_isssd, TRUE, NULL);
+		}
+		error = (*cdevsw[major(vp->v_rdev)].d_read)(vp->v_rdev, uio, ap->a_ioflag);
 
-			if (throttle_info) {
-				throttle_info_end_io_internal(throttle_info, thread_throttle_level);
-			}
+		if (throttle_info) {
+			throttle_info_end_io_internal(throttle_info, thread_throttle_level);
+		}
 
 		return (error);
-		}
+	}
 
 	case VBLK:
 		if (uio->uio_offset < 0)
@@ -500,23 +480,22 @@ spec_read(struct vnop_read_args *ap)
 
 		devBlockSize = vp->v_specsize;
 
-		if (devBlockSize > PAGE_SIZE) 
+		if (devBlockSize > PAGE_SIZE)
 			return (EINVAL);
 
-	        bscale = PAGE_SIZE / devBlockSize;
-		bsize = bscale * devBlockSize;
+		bscale = PAGE_SIZE / devBlockSize;
+		bsize  = bscale * devBlockSize;
 
 		do {
 			on = uio->uio_offset % bsize;
 
-			bn = (daddr64_t)((uio->uio_offset / devBlockSize) &~ (bscale - 1));
-			
+			bn = (daddr64_t)((uio->uio_offset / devBlockSize) & ~(bscale - 1));
+
 			if (vp->v_speclastr + bscale == bn) {
-			        nextbn = bn + bscale;
-				error = buf_breadn(vp, bn, (int)bsize, &nextbn,
-					       (int *)&bsize, 1, NOCRED, &bp);
+				nextbn = bn + bscale;
+				error  = buf_breadn(vp, bn, (int)bsize, &nextbn, (int *)&bsize, 1, NOCRED, &bp);
 			} else
-			        error = buf_bread(vp, bn, (int)bsize, NOCRED, &bp);
+				error = buf_bread(vp, bn, (int)bsize, NOCRED, &bp);
 
 			vnode_lock(vp);
 			vp->v_speclastr = bn;
@@ -524,12 +503,12 @@ spec_read(struct vnop_read_args *ap)
 
 			n = bsize - buf_resid(bp);
 			if ((on > n) || error) {
-			        if (!error)
-				        error = EINVAL;
+				if (!error)
+					error = EINVAL;
 				buf_brelse(bp);
 				return (error);
 			}
-			n = min((unsigned)(n  - on), uio_resid(uio));
+			n = min((unsigned)(n - on), uio_resid(uio));
 
 			error = uiomove((char *)buf_dataptr(bp) + on, n, uio);
 			if (n + on == bsize)
@@ -550,15 +529,15 @@ spec_read(struct vnop_read_args *ap)
  * Vnode op for write
  */
 int
-spec_write(struct vnop_write_args *ap)
+spec_write(struct vnop_write_args * ap)
 {
-	struct vnode *vp = ap->a_vp;
-	struct uio *uio = ap->a_uio;
-	struct buf *bp;
+	struct vnode * vp = ap->a_vp;
+	struct uio * uio  = ap->a_uio;
+	struct buf * bp;
 	daddr64_t bn;
 	int bsize, blkmask, bscale;
 	int io_sync;
-	int devBlockSize=0;
+	int devBlockSize = 0;
 	int n, on;
 	int error = 0;
 	dev_t dev;
@@ -571,27 +550,25 @@ spec_write(struct vnop_write_args *ap)
 #endif
 
 	switch (vp->v_type) {
-
-	case VCHR:
-		{
-			struct _throttle_io_info_t *throttle_info = NULL;
-			int thread_throttle_level;
-                if (cdevsw[major(vp->v_rdev)].d_type == D_DISK && vp->v_un.vu_specinfo->si_throttleable) {
+	case VCHR: {
+		struct _throttle_io_info_t * throttle_info = NULL;
+		int thread_throttle_level;
+		if (cdevsw[major(vp->v_rdev)].d_type == D_DISK && vp->v_un.vu_specinfo->si_throttleable) {
 			throttle_info = &_throttle_io_info[vp->v_un.vu_specinfo->si_devbsdunit];
 
-				thread_throttle_level = throttle_info_update_internal(throttle_info, NULL, 0, vp->v_un.vu_specinfo->si_isssd, TRUE, NULL);
+			thread_throttle_level =
+			    throttle_info_update_internal(throttle_info, NULL, 0, vp->v_un.vu_specinfo->si_isssd, TRUE, NULL);
 
 			microuptime(&throttle_info->throttle_last_write_timestamp);
-                }
-		error = (*cdevsw[major(vp->v_rdev)].d_write)
-			(vp->v_rdev, uio, ap->a_ioflag);
+		}
+		error = (*cdevsw[major(vp->v_rdev)].d_write)(vp->v_rdev, uio, ap->a_ioflag);
 
-			if (throttle_info) {
-				throttle_info_end_io_internal(throttle_info, thread_throttle_level);
-			}
+		if (throttle_info) {
+			throttle_info_end_io_internal(throttle_info, thread_throttle_level);
+		}
 
 		return (error);
-		}
+	}
 
 	case VBLK:
 		if (uio_resid(uio) == 0)
@@ -605,15 +582,14 @@ spec_write(struct vnop_write_args *ap)
 
 		devBlockSize = vp->v_specsize;
 		if (devBlockSize > PAGE_SIZE)
-			return(EINVAL);
+			return (EINVAL);
 
-	        bscale = PAGE_SIZE / devBlockSize;
+		bscale  = PAGE_SIZE / devBlockSize;
 		blkmask = bscale - 1;
-		bsize = bscale * devBlockSize;
-		
+		bsize   = bscale * devBlockSize;
 
 		do {
-			bn = (daddr64_t)((uio->uio_offset / devBlockSize) &~ blkmask);
+			bn = (daddr64_t)((uio->uio_offset / devBlockSize) & ~blkmask);
 			on = uio->uio_offset % bsize;
 
 			n = min((unsigned)(bsize - on), uio_resid(uio));
@@ -628,17 +604,15 @@ spec_write(struct vnop_write_args *ap)
 			 *
 			 * Otherwise, we fall back on buf_bread().
 			 */
-			if (n == bsize &&
-			    vp->v_specdevsize != (u_int64_t)0 &&
-			    (uio->uio_offset + (u_int64_t)n) > vp->v_specdevsize) {
-			    /* reduce the size of the read to what is there */
-			    n = (uio->uio_offset + (u_int64_t)n) - vp->v_specdevsize;
+			if (n == bsize && vp->v_specdevsize != (u_int64_t)0 && (uio->uio_offset + (u_int64_t)n) > vp->v_specdevsize) {
+				/* reduce the size of the read to what is there */
+				n = (uio->uio_offset + (u_int64_t)n) - vp->v_specdevsize;
 			}
 
 			if (n == bsize)
-			        bp = buf_getblk(vp, bn, bsize, 0, 0, BLK_WRITE);
+				bp = buf_getblk(vp, bn, bsize, 0, 0, BLK_WRITE);
 			else
-			        error = (int)buf_bread(vp, bn, bsize, NOCRED, &bp);
+				error = (int)buf_bread(vp, bn, bsize, NOCRED, &bp);
 
 			/* Translate downstream error for upstream, if needed */
 			if (!error)
@@ -656,13 +630,13 @@ spec_write(struct vnop_write_args *ap)
 			}
 			buf_markaged(bp);
 
-			if (io_sync) 
-			        error = buf_bwrite(bp);
+			if (io_sync)
+				error = buf_bwrite(bp);
 			else {
-			        if ((n + on) == bsize)
-				        error = buf_bawrite(bp);
+				if ((n + on) == bsize)
+					error = buf_bawrite(bp);
 				else
-				        error = buf_bdwrite(bp);
+					error = buf_bdwrite(bp);
 			}
 		} while (error == 0 && uio_resid(uio) > 0 && n != 0);
 		return (error);
@@ -679,20 +653,17 @@ spec_write(struct vnop_write_args *ap)
  * Device ioctl operation.
  */
 int
-spec_ioctl(struct vnop_ioctl_args *ap)
+spec_ioctl(struct vnop_ioctl_args * ap)
 {
-	proc_t p = vfs_context_proc(ap->a_context);
-	dev_t dev = ap->a_vp->v_rdev;
-	int	retval = 0;
+	proc_t p   = vfs_context_proc(ap->a_context);
+	dev_t dev  = ap->a_vp->v_rdev;
+	int retval = 0;
 
-	KERNEL_DEBUG_CONSTANT(FSDBG_CODE(DBG_IOCTL, 0) | DBG_FUNC_START,
-		dev, ap->a_command, ap->a_fflag, ap->a_vp->v_type, 0);
+	KERNEL_DEBUG_CONSTANT(FSDBG_CODE(DBG_IOCTL, 0) | DBG_FUNC_START, dev, ap->a_command, ap->a_fflag, ap->a_vp->v_type, 0);
 
 	switch (ap->a_vp->v_type) {
-
 	case VCHR:
-		retval = (*cdevsw[major(dev)].d_ioctl)(dev, ap->a_command, ap->a_data,
-						       ap->a_fflag, p);
+		retval = (*cdevsw[major(dev)].d_ioctl)(dev, ap->a_command, ap->a_data, ap->a_fflag, p);
 		break;
 
 	case VBLK:
@@ -705,22 +676,20 @@ spec_ioctl(struct vnop_ioctl_args *ap)
 		panic("spec_ioctl");
 		/* NOTREACHED */
 	}
-	KERNEL_DEBUG_CONSTANT(FSDBG_CODE(DBG_IOCTL, 0) | DBG_FUNC_END,
-		dev, ap->a_command, ap->a_fflag, retval, 0);
+	KERNEL_DEBUG_CONSTANT(FSDBG_CODE(DBG_IOCTL, 0) | DBG_FUNC_END, dev, ap->a_command, ap->a_fflag, retval, 0);
 
 	return (retval);
 }
 
 int
-spec_select(struct vnop_select_args *ap)
+spec_select(struct vnop_select_args * ap)
 {
 	proc_t p = vfs_context_proc(ap->a_context);
 	dev_t dev;
 
 	switch (ap->a_vp->v_type) {
-
 	default:
-		return (1);		/* XXX */
+		return (1); /* XXX */
 
 	case VCHR:
 		dev = ap->a_vp->v_rdev;
@@ -728,10 +697,10 @@ spec_select(struct vnop_select_args *ap)
 	}
 }
 
-static int filt_specattach(struct knote *kn, struct kevent_internal_s *kev);
+static int filt_specattach(struct knote * kn, struct kevent_internal_s * kev);
 
 int
-spec_kqfilter(vnode_t vp, struct knote *kn, struct kevent_internal_s *kev)
+spec_kqfilter(vnode_t vp, struct knote * kn, struct kevent_internal_s * kev)
 {
 	dev_t dev;
 
@@ -747,7 +716,7 @@ spec_kqfilter(vnode_t vp, struct knote *kn, struct kevent_internal_s *kev)
 	 * other attaches.
 	 */
 	int32_t tmp_flags = kn->kn_flags;
-	int64_t tmp_data = kn->kn_data;
+	int64_t tmp_data  = kn->kn_data;
 	int res;
 
 	res = bpfkqfilter(dev, kn);
@@ -755,7 +724,7 @@ spec_kqfilter(vnode_t vp, struct knote *kn, struct kevent_internal_s *kev)
 		return res;
 	}
 	kn->kn_flags = tmp_flags;
-	kn->kn_data = tmp_data;
+	kn->kn_data  = tmp_data;
 #endif
 
 	if (major(dev) > nchrdev) {
@@ -763,7 +732,7 @@ spec_kqfilter(vnode_t vp, struct knote *kn, struct kevent_internal_s *kev)
 		return 0;
 	}
 
-	kn->kn_vnode_kqok = !!(cdevsw_flags[major(dev)] & CDEVSW_SELECT_KQUEUE);
+	kn->kn_vnode_kqok     = !!(cdevsw_flags[major(dev)] & CDEVSW_SELECT_KQUEUE);
 	kn->kn_vnode_use_ofst = !!(cdevsw_flags[major(dev)] & CDEVSW_USE_OFFSET);
 
 	if (cdevsw_flags[major(dev)] & CDEVSW_IS_PTS) {
@@ -803,49 +772,98 @@ spec_fsync_internal(vnode_t vp, int waitfor, __unused vfs_context_t context)
 }
 
 int
-spec_fsync(struct vnop_fsync_args *ap)
+spec_fsync(struct vnop_fsync_args * ap)
 {
 	return spec_fsync_internal(ap->a_vp, ap->a_waitfor, ap->a_context);
 }
-
 
 /*
  * Just call the device strategy routine
  */
 void throttle_init(void);
 
+#if 0
+#define DEBUG_ALLOC_THROTTLE_INFO(format, debug_info, args...) \
+	do {                                                       \
+		if ((debug_info)->alloc)                               \
+			printf("%s: " format, __FUNCTION__, ##args);       \
+	} while (0)
 
-#if 0 
-#define DEBUG_ALLOC_THROTTLE_INFO(format, debug_info, args...)	\
-        do {                                                    \
-               if ((debug_info)->alloc)                           \
-               printf("%s: "format, __FUNCTION__, ## args);     \
-       } while(0)
-
-#else 
+#else
 #define DEBUG_ALLOC_THROTTLE_INFO(format, debug_info, args...)
 #endif
 
+SYSCTL_INT(_debug,
+           OID_AUTO,
+           lowpri_throttle_tier1_window_msecs,
+           CTLFLAG_RW | CTLFLAG_LOCKED,
+           &throttle_windows_msecs[THROTTLE_LEVEL_TIER1],
+           0,
+           "");
+SYSCTL_INT(_debug,
+           OID_AUTO,
+           lowpri_throttle_tier2_window_msecs,
+           CTLFLAG_RW | CTLFLAG_LOCKED,
+           &throttle_windows_msecs[THROTTLE_LEVEL_TIER2],
+           0,
+           "");
+SYSCTL_INT(_debug,
+           OID_AUTO,
+           lowpri_throttle_tier3_window_msecs,
+           CTLFLAG_RW | CTLFLAG_LOCKED,
+           &throttle_windows_msecs[THROTTLE_LEVEL_TIER3],
+           0,
+           "");
 
-SYSCTL_INT(_debug, OID_AUTO, lowpri_throttle_tier1_window_msecs, CTLFLAG_RW | CTLFLAG_LOCKED, &throttle_windows_msecs[THROTTLE_LEVEL_TIER1], 0, "");
-SYSCTL_INT(_debug, OID_AUTO, lowpri_throttle_tier2_window_msecs, CTLFLAG_RW | CTLFLAG_LOCKED, &throttle_windows_msecs[THROTTLE_LEVEL_TIER2], 0, "");
-SYSCTL_INT(_debug, OID_AUTO, lowpri_throttle_tier3_window_msecs, CTLFLAG_RW | CTLFLAG_LOCKED, &throttle_windows_msecs[THROTTLE_LEVEL_TIER3], 0, "");
+SYSCTL_INT(_debug,
+           OID_AUTO,
+           lowpri_throttle_tier1_io_period_msecs,
+           CTLFLAG_RW | CTLFLAG_LOCKED,
+           &throttle_io_period_msecs[THROTTLE_LEVEL_TIER1],
+           0,
+           "");
+SYSCTL_INT(_debug,
+           OID_AUTO,
+           lowpri_throttle_tier2_io_period_msecs,
+           CTLFLAG_RW | CTLFLAG_LOCKED,
+           &throttle_io_period_msecs[THROTTLE_LEVEL_TIER2],
+           0,
+           "");
+SYSCTL_INT(_debug,
+           OID_AUTO,
+           lowpri_throttle_tier3_io_period_msecs,
+           CTLFLAG_RW | CTLFLAG_LOCKED,
+           &throttle_io_period_msecs[THROTTLE_LEVEL_TIER3],
+           0,
+           "");
 
-SYSCTL_INT(_debug, OID_AUTO, lowpri_throttle_tier1_io_period_msecs, CTLFLAG_RW | CTLFLAG_LOCKED, &throttle_io_period_msecs[THROTTLE_LEVEL_TIER1], 0, "");
-SYSCTL_INT(_debug, OID_AUTO, lowpri_throttle_tier2_io_period_msecs, CTLFLAG_RW | CTLFLAG_LOCKED, &throttle_io_period_msecs[THROTTLE_LEVEL_TIER2], 0, "");
-SYSCTL_INT(_debug, OID_AUTO, lowpri_throttle_tier3_io_period_msecs, CTLFLAG_RW | CTLFLAG_LOCKED, &throttle_io_period_msecs[THROTTLE_LEVEL_TIER3], 0, "");
-
-SYSCTL_INT(_debug, OID_AUTO, lowpri_throttle_tier1_io_period_ssd_msecs, CTLFLAG_RW | CTLFLAG_LOCKED, &throttle_io_period_ssd_msecs[THROTTLE_LEVEL_TIER1], 0, "");
-SYSCTL_INT(_debug, OID_AUTO, lowpri_throttle_tier2_io_period_ssd_msecs, CTLFLAG_RW | CTLFLAG_LOCKED, &throttle_io_period_ssd_msecs[THROTTLE_LEVEL_TIER2], 0, "");
-SYSCTL_INT(_debug, OID_AUTO, lowpri_throttle_tier3_io_period_ssd_msecs, CTLFLAG_RW | CTLFLAG_LOCKED, &throttle_io_period_ssd_msecs[THROTTLE_LEVEL_TIER3], 0, "");
+SYSCTL_INT(_debug,
+           OID_AUTO,
+           lowpri_throttle_tier1_io_period_ssd_msecs,
+           CTLFLAG_RW | CTLFLAG_LOCKED,
+           &throttle_io_period_ssd_msecs[THROTTLE_LEVEL_TIER1],
+           0,
+           "");
+SYSCTL_INT(_debug,
+           OID_AUTO,
+           lowpri_throttle_tier2_io_period_ssd_msecs,
+           CTLFLAG_RW | CTLFLAG_LOCKED,
+           &throttle_io_period_ssd_msecs[THROTTLE_LEVEL_TIER2],
+           0,
+           "");
+SYSCTL_INT(_debug,
+           OID_AUTO,
+           lowpri_throttle_tier3_io_period_ssd_msecs,
+           CTLFLAG_RW | CTLFLAG_LOCKED,
+           &throttle_io_period_ssd_msecs[THROTTLE_LEVEL_TIER3],
+           0,
+           "");
 
 SYSCTL_INT(_debug, OID_AUTO, lowpri_throttle_enabled, CTLFLAG_RW | CTLFLAG_LOCKED, &lowpri_throttle_enabled, 0, "");
 
-
-static lck_grp_t        *throttle_lock_grp;
-static lck_attr_t       *throttle_lock_attr;
-static lck_grp_attr_t   *throttle_lock_grp_attr;
-
+static lck_grp_t * throttle_lock_grp;
+static lck_attr_t * throttle_lock_attr;
+static lck_grp_attr_t * throttle_lock_grp_attr;
 
 /*
  * throttled I/O helper function
@@ -868,7 +886,6 @@ num_trailing_0(uint64_t n)
 	return count;
 }
 
-
 /*
  * Release the reference and if the item was allocated and this is the last
  * reference then free it.
@@ -876,30 +893,28 @@ num_trailing_0(uint64_t n)
  * This routine always returns the old value.
  */
 static int
-throttle_info_rel(struct _throttle_io_info_t *info)
+throttle_info_rel(struct _throttle_io_info_t * info)
 {
 	SInt32 oldValue = OSDecrementAtomic(&info->throttle_refcnt);
 
-	DEBUG_ALLOC_THROTTLE_INFO("refcnt = %d info = %p\n", 
-		info, (int)(oldValue -1), info );
+	DEBUG_ALLOC_THROTTLE_INFO("refcnt = %d info = %p\n", info, (int)(oldValue - 1), info);
 
 	/* The reference count just went negative, very bad */
 	if (oldValue == 0)
 		panic("throttle info ref cnt went negative!");
 
-	/* 
-	 * Once reference count is zero, no one else should be able to take a 
-	 * reference 
+	/*
+	 * Once reference count is zero, no one else should be able to take a
+	 * reference
 	 */
 	if ((info->throttle_refcnt == 0) && (info->throttle_alloc)) {
 		DEBUG_ALLOC_THROTTLE_INFO("Freeing info = %p\n", info);
-		
+
 		lck_mtx_destroy(&info->throttle_lock, throttle_lock_grp);
-		FREE(info, M_TEMP); 
+		FREE(info, M_TEMP);
 	}
 	return oldValue;
 }
-
 
 /*
  * Just take a reference on the throttle info structure.
@@ -907,12 +922,11 @@ throttle_info_rel(struct _throttle_io_info_t *info)
  * This routine always returns the old value.
  */
 static SInt32
-throttle_info_ref(struct _throttle_io_info_t *info)
+throttle_info_ref(struct _throttle_io_info_t * info)
 {
 	SInt32 oldValue = OSIncrementAtomic(&info->throttle_refcnt);
 
-	DEBUG_ALLOC_THROTTLE_INFO("refcnt = %d info = %p\n", 
-		info, (int)(oldValue -1), info );
+	DEBUG_ALLOC_THROTTLE_INFO("refcnt = %d info = %p\n", info, (int)(oldValue - 1), info);
 	/* Allocated items should never have a reference of zero */
 	if (info->throttle_alloc && (oldValue == 0))
 		panic("Taking a reference without calling create throttle info!\n");
@@ -931,17 +945,17 @@ throttle_info_ref(struct _throttle_io_info_t *info)
  * to free it
  */
 static uint32_t
-throttle_timer_start(struct _throttle_io_info_t *info, boolean_t update_io_count, int wakelevel)
-{	
-	struct timeval  elapsed;
-	struct timeval  now;
-	struct timeval  period;
-	uint64_t	elapsed_msecs;
-	int		throttle_level;
-	int		level;
-	int		msecs;
-	boolean_t	throttled = FALSE;
-	boolean_t	need_timer = FALSE;
+throttle_timer_start(struct _throttle_io_info_t * info, boolean_t update_io_count, int wakelevel)
+{
+	struct timeval elapsed;
+	struct timeval now;
+	struct timeval period;
+	uint64_t elapsed_msecs;
+	int throttle_level;
+	int level;
+	int msecs;
+	boolean_t throttled  = FALSE;
+	boolean_t need_timer = FALSE;
 
 	microuptime(&now);
 
@@ -954,22 +968,19 @@ throttle_timer_start(struct _throttle_io_info_t *info, boolean_t update_io_count
 
 		info->throttle_min_timer_deadline = now;
 
-		msecs = info->throttle_io_periods[THROTTLE_LEVEL_THROTTLED];
-		period.tv_sec = msecs / 1000;
+		msecs          = info->throttle_io_periods[THROTTLE_LEVEL_THROTTLED];
+		period.tv_sec  = msecs / 1000;
 		period.tv_usec = (msecs % 1000) * 1000;
 
 		timevaladd(&info->throttle_min_timer_deadline, &period);
 	}
 	for (throttle_level = THROTTLE_LEVEL_START; throttle_level < THROTTLE_LEVEL_END; throttle_level++) {
-
 		elapsed = now;
 		timevalsub(&elapsed, &info->throttle_window_start_timestamp[throttle_level]);
 		elapsed_msecs = (uint64_t)elapsed.tv_sec * (uint64_t)1000 + (elapsed.tv_usec / 1000);
 
 		for (level = throttle_level + 1; level <= THROTTLE_LEVEL_END; level++) {
-
 			if (!TAILQ_EMPTY(&info->throttle_uthlist[level])) {
-
 				if (elapsed_msecs < (uint64_t)throttle_windows_msecs[level] || info->throttle_inflight_count[throttle_level]) {
 					/*
 					 * we had an I/O occur at a higher priority tier within
@@ -991,36 +1002,35 @@ throttle_timer_start(struct _throttle_io_info_t *info, boolean_t update_io_count
 			break;
 	}
 	if (throttled == TRUE) {
-		uint64_t	deadline = 0;
-		struct timeval  target;
-		struct timeval  min_target;
+		uint64_t deadline = 0;
+		struct timeval target;
+		struct timeval min_target;
 
-	        /*
+		/*
 		 * we've got at least one tier still in a throttled window
 		 * so we need a timer running... compute the next deadline
 		 * and schedule it
 		 */
-		for (level = throttle_level+1; level <= THROTTLE_LEVEL_END; level++) {
-
+		for (level = throttle_level + 1; level <= THROTTLE_LEVEL_END; level++) {
 			if (TAILQ_EMPTY(&info->throttle_uthlist[level]))
 				continue;
 
 			target = info->throttle_start_IO_period_timestamp[level];
 
-			msecs = info->throttle_io_periods[level];
-			period.tv_sec = msecs / 1000;
+			msecs          = info->throttle_io_periods[level];
+			period.tv_sec  = msecs / 1000;
 			period.tv_usec = (msecs % 1000) * 1000;
 
 			timevaladd(&target, &period);
-			
+
 			if (need_timer == FALSE || timevalcmp(&target, &min_target, <)) {
 				min_target = target;
 				need_timer = TRUE;
 			}
 		}
 		if (timevalcmp(&info->throttle_min_timer_deadline, &now, >)) {
-		        if (timevalcmp(&info->throttle_min_timer_deadline, &min_target, >))
-			        min_target = info->throttle_min_timer_deadline;
+			if (timevalcmp(&info->throttle_min_timer_deadline, &min_target, >))
+				min_target = info->throttle_min_timer_deadline;
 		}
 
 		if (info->throttle_timer_active) {
@@ -1043,7 +1053,7 @@ throttle_timer_start(struct _throttle_io_info_t *info, boolean_t update_io_count
 			 * 32-bit which allows us to use the clock_interval_to_deadline()
 			 * routine.
 			 */
-			int	target_msecs;
+			int target_msecs;
 
 			if (info->throttle_timer_ref == 0) {
 				/*
@@ -1074,24 +1084,23 @@ throttle_timer_start(struct _throttle_io_info_t *info, boolean_t update_io_count
 	return (throttle_level);
 }
 
-
 static void
-throttle_timer(struct _throttle_io_info_t *info)
+throttle_timer(struct _throttle_io_info_t * info)
 {
-	uthread_t       ut, utlist;
-	struct timeval	elapsed;
-	struct timeval	now;
-	uint64_t	elapsed_msecs;
-	int		throttle_level;
-	int		level;
-	int		wake_level;
-	caddr_t		wake_address = NULL;
-        boolean_t	update_io_count = FALSE;
-	boolean_t	need_wakeup = FALSE;
-	boolean_t	need_release = FALSE;
+	uthread_t ut, utlist;
+	struct timeval elapsed;
+	struct timeval now;
+	uint64_t elapsed_msecs;
+	int throttle_level;
+	int level;
+	int wake_level;
+	caddr_t wake_address      = NULL;
+	boolean_t update_io_count = FALSE;
+	boolean_t need_wakeup     = FALSE;
+	boolean_t need_release    = FALSE;
 
 	ut = NULL;
-        lck_mtx_lock(&info->throttle_lock);
+	lck_mtx_lock(&info->throttle_lock);
 
 	info->throttle_timer_active = 0;
 	microuptime(&now);
@@ -1101,22 +1110,21 @@ throttle_timer(struct _throttle_io_info_t *info)
 	elapsed_msecs = (uint64_t)elapsed.tv_sec * (uint64_t)1000 + (elapsed.tv_usec / 1000);
 
 	if (elapsed_msecs >= (uint64_t)info->throttle_io_periods[THROTTLE_LEVEL_THROTTLED]) {
-
 		wake_level = info->throttle_next_wake_level;
 
 		for (level = THROTTLE_LEVEL_START; level < THROTTLE_LEVEL_END; level++) {
-
 			elapsed = now;
 			timevalsub(&elapsed, &info->throttle_start_IO_period_timestamp[wake_level]);
 			elapsed_msecs = (uint64_t)elapsed.tv_sec * (uint64_t)1000 + (elapsed.tv_usec / 1000);
 
-			if (elapsed_msecs >= (uint64_t)info->throttle_io_periods[wake_level] && !TAILQ_EMPTY(&info->throttle_uthlist[wake_level])) {
+			if (elapsed_msecs >= (uint64_t)info->throttle_io_periods[wake_level] &&
+			    !TAILQ_EMPTY(&info->throttle_uthlist[wake_level])) {
 				/*
 				 * we're closing out the current IO period...
 				 * if we have a waiting thread, wake it up
 				 * after we have reset the I/O window info
 				 */
-				need_wakeup = TRUE;
+				need_wakeup     = TRUE;
 				update_io_count = TRUE;
 
 				info->throttle_next_wake_level = wake_level - 1;
@@ -1134,53 +1142,50 @@ throttle_timer(struct _throttle_io_info_t *info)
 	}
 	if (need_wakeup == TRUE) {
 		if (!TAILQ_EMPTY(&info->throttle_uthlist[wake_level])) {
-
 			ut = (uthread_t)TAILQ_FIRST(&info->throttle_uthlist[wake_level]);
 			TAILQ_REMOVE(&info->throttle_uthlist[wake_level], ut, uu_throttlelist);
 			ut->uu_on_throttlelist = THROTTLE_LEVEL_NONE;
-			ut->uu_is_throttled = false;
+			ut->uu_is_throttled    = false;
 
 			wake_address = (caddr_t)&ut->uu_on_throttlelist;
 		}
 	} else
 		wake_level = THROTTLE_LEVEL_START;
 
-        throttle_level = throttle_timer_start(info, update_io_count, wake_level);
+	throttle_level = throttle_timer_start(info, update_io_count, wake_level);
 
 	if (wake_address != NULL)
 		wakeup(wake_address);
 
 	for (level = THROTTLE_LEVEL_THROTTLED; level <= throttle_level; level++) {
-
-		TAILQ_FOREACH_SAFE(ut, &info->throttle_uthlist[level], uu_throttlelist, utlist) {
-
+		TAILQ_FOREACH_SAFE(ut, &info->throttle_uthlist[level], uu_throttlelist, utlist)
+		{
 			TAILQ_REMOVE(&info->throttle_uthlist[level], ut, uu_throttlelist);
 			ut->uu_on_throttlelist = THROTTLE_LEVEL_NONE;
-			ut->uu_is_throttled = false;
+			ut->uu_is_throttled    = false;
 
 			wakeup(&ut->uu_on_throttlelist);
 		}
 	}
 	if (info->throttle_timer_active == 0 && info->throttle_timer_ref) {
 		info->throttle_timer_ref = 0;
-		need_release = TRUE;
+		need_release             = TRUE;
 	}
-        lck_mtx_unlock(&info->throttle_lock);
+	lck_mtx_unlock(&info->throttle_lock);
 
 	if (need_release == TRUE)
 		throttle_info_rel(info);
 }
 
-
 static int
-throttle_add_to_list(struct _throttle_io_info_t *info, uthread_t ut, int mylevel, boolean_t insert_tail)
+throttle_add_to_list(struct _throttle_io_info_t * info, uthread_t ut, int mylevel, boolean_t insert_tail)
 {
 	boolean_t start_timer = FALSE;
-	int level = THROTTLE_LEVEL_START;
+	int level             = THROTTLE_LEVEL_START;
 
 	if (TAILQ_EMPTY(&info->throttle_uthlist[mylevel])) {
 		info->throttle_start_IO_period_timestamp[mylevel] = info->throttle_last_IO_timestamp[mylevel];
-		start_timer = TRUE;
+		start_timer                                       = TRUE;
 	}
 
 	if (insert_tail == TRUE)
@@ -1227,20 +1232,20 @@ throttle_init_throttle_window(void)
 
 	if (PE_get_default("kern.io_throttle_window_tier3", &throttle_window_size, sizeof(throttle_window_size)))
 		throttle_windows_msecs[THROTTLE_LEVEL_TIER3] = throttle_window_size;
-	
+
 	/* Override with boot-args */
 	if (PE_parse_boot_argn("io_throttle_window_tier1", &throttle_window_size, sizeof(throttle_window_size)))
 		throttle_windows_msecs[THROTTLE_LEVEL_TIER1] = throttle_window_size;
 
 	if (PE_parse_boot_argn("io_throttle_window_tier2", &throttle_window_size, sizeof(throttle_window_size)))
 		throttle_windows_msecs[THROTTLE_LEVEL_TIER2] = throttle_window_size;
-	
+
 	if (PE_parse_boot_argn("io_throttle_window_tier3", &throttle_window_size, sizeof(throttle_window_size)))
 		throttle_windows_msecs[THROTTLE_LEVEL_TIER3] = throttle_window_size;
 }
 
 static void
-throttle_init_throttle_period(struct _throttle_io_info_t *info, boolean_t isssd)
+throttle_init_throttle_period(struct _throttle_io_info_t * info, boolean_t isssd)
 {
 	int throttle_period_size;
 
@@ -1261,66 +1266,65 @@ throttle_init_throttle_period(struct _throttle_io_info_t *info, boolean_t isssd)
 	/* Override global values with device-tree properties */
 	if (PE_get_default("kern.io_throttle_period_tier1", &throttle_period_size, sizeof(throttle_period_size)))
 		info->throttle_io_periods[THROTTLE_LEVEL_TIER1] = throttle_period_size;
-	
+
 	if (PE_get_default("kern.io_throttle_period_tier2", &throttle_period_size, sizeof(throttle_period_size)))
 		info->throttle_io_periods[THROTTLE_LEVEL_TIER2] = throttle_period_size;
 
 	if (PE_get_default("kern.io_throttle_period_tier3", &throttle_period_size, sizeof(throttle_period_size)))
 		info->throttle_io_periods[THROTTLE_LEVEL_TIER3] = throttle_period_size;
-	
+
 	/* Override with boot-args */
 	if (PE_parse_boot_argn("io_throttle_period_tier1", &throttle_period_size, sizeof(throttle_period_size)))
 		info->throttle_io_periods[THROTTLE_LEVEL_TIER1] = throttle_period_size;
-	
+
 	if (PE_parse_boot_argn("io_throttle_period_tier2", &throttle_period_size, sizeof(throttle_period_size)))
 		info->throttle_io_periods[THROTTLE_LEVEL_TIER2] = throttle_period_size;
 
 	if (PE_parse_boot_argn("io_throttle_period_tier3", &throttle_period_size, sizeof(throttle_period_size)))
 		info->throttle_io_periods[THROTTLE_LEVEL_TIER3] = throttle_period_size;
-
 }
 
 #if CONFIG_IOSCHED
-extern	void vm_io_reprioritize_init(void);
-int	iosched_enabled = 1;
+extern void vm_io_reprioritize_init(void);
+int iosched_enabled = 1;
 #endif
 
 void
 throttle_init(void)
 {
-        struct _throttle_io_info_t *info;
-        int	i;
-	int	level;
+	struct _throttle_io_info_t * info;
+	int i;
+	int level;
 #if CONFIG_IOSCHED
-	int 	iosched;
+	int iosched;
 #endif
-	/*                                                                                                                                    
-         * allocate lock group attribute and group                                                                                            
-         */
-        throttle_lock_grp_attr = lck_grp_attr_alloc_init();
-        throttle_lock_grp = lck_grp_alloc_init("throttle I/O", throttle_lock_grp_attr);
+	/*
+	 * allocate lock group attribute and group
+	 */
+	throttle_lock_grp_attr = lck_grp_attr_alloc_init();
+	throttle_lock_grp      = lck_grp_alloc_init("throttle I/O", throttle_lock_grp_attr);
 
 	/* Update throttle parameters based on device tree configuration */
 	throttle_init_throttle_window();
 
-        /*                                                                                                                                    
-         * allocate the lock attribute                                                                                                        
-         */
-        throttle_lock_attr = lck_attr_alloc_init();
+	/*
+	 * allocate the lock attribute
+	 */
+	throttle_lock_attr = lck_attr_alloc_init();
 
 	for (i = 0; i < LOWPRI_MAX_NUM_DEV; i++) {
-	        info = &_throttle_io_info[i];
-	  
-	        lck_mtx_init(&info->throttle_lock, throttle_lock_grp, throttle_lock_attr);
+		info = &_throttle_io_info[i];
+
+		lck_mtx_init(&info->throttle_lock, throttle_lock_grp, throttle_lock_attr);
 		info->throttle_timer_call = thread_call_allocate((thread_call_func_t)throttle_timer, (thread_call_param_t)info);
 
 		for (level = 0; level <= THROTTLE_LEVEL_END; level++) {
 			TAILQ_INIT(&info->throttle_uthlist[level]);
-			info->throttle_last_IO_pid[level] = 0;
+			info->throttle_last_IO_pid[level]    = 0;
 			info->throttle_inflight_count[level] = 0;
 		}
-		info->throttle_next_wake_level = THROTTLE_LEVEL_END;
-		info->throttle_disabled = 0;
+		info->throttle_next_wake_level         = THROTTLE_LEVEL_END;
+		info->throttle_disabled                = 0;
 		info->throttle_is_fusion_with_priority = 0;
 	}
 #if CONFIG_IOSCHED
@@ -1397,13 +1401,13 @@ rethrottle_thread(uthread_t ut)
 			wakeup(&ut->uu_on_throttlelist);
 
 			rethrottle_wakeups++;
-			KERNEL_DEBUG_CONSTANT((FSDBG_CODE(DBG_FSRW, 102)), thread_tid(ut->uu_thread), ut->uu_on_throttlelist, my_new_level, 0, 0);
+			KERNEL_DEBUG_CONSTANT((FSDBG_CODE(DBG_FSRW, 102)), thread_tid(ut->uu_thread), ut->uu_on_throttlelist, my_new_level, 0,
+			                      0);
 		}
 	}
 	lck_spin_unlock(&ut->uu_rethrottle_lock);
 	ml_set_interrupts_enabled(s);
 }
-
 
 /*
  * KPI routine
@@ -1415,15 +1419,15 @@ rethrottle_thread(uthread_t ut)
 void *
 throttle_info_create(void)
 {
-	struct _throttle_io_info_t *info; 
-	int	level;
+	struct _throttle_io_info_t * info;
+	int level;
 
 	MALLOC(info, struct _throttle_io_info_t *, sizeof(*info), M_TEMP, M_ZERO | M_WAITOK);
 	/* Should never happen but just in case */
 	if (info == NULL)
 		return NULL;
 	/* Mark that this one was allocated and needs to be freed */
-	DEBUG_ALLOC_THROTTLE_INFO("Creating info = %p\n", info, info );
+	DEBUG_ALLOC_THROTTLE_INFO("Creating info = %p\n", info, info);
 	info->throttle_alloc = TRUE;
 
 	lck_mtx_init(&info->throttle_lock, throttle_lock_grp, throttle_lock_attr);
@@ -1442,15 +1446,14 @@ throttle_info_create(void)
 /*
  * KPI routine
  *
- * Release the throttle info pointer if all the reference are gone. Should be 
- * called to release reference taken by throttle_info_create 
- */ 
+ * Release the throttle info pointer if all the reference are gone. Should be
+ * called to release reference taken by throttle_info_create
+ */
 void
-throttle_info_release(void *throttle_info)
+throttle_info_release(void * throttle_info)
 {
-	DEBUG_ALLOC_THROTTLE_INFO("Releaseing info = %p\n",
-		(struct _throttle_io_info_t *)throttle_info,
-		(struct _throttle_io_info_t *)throttle_info);
+	DEBUG_ALLOC_THROTTLE_INFO("Releaseing info = %p\n", (struct _throttle_io_info_t *)throttle_info,
+	                          (struct _throttle_io_info_t *)throttle_info);
 	if (throttle_info) /* Just to be careful */
 		throttle_info_rel(throttle_info);
 }
@@ -1461,10 +1464,10 @@ throttle_info_release(void *throttle_info)
  * File Systems that create an info structure, need to call this routine in
  * their mount routine (used by cluster code). File Systems that call this in
  * their mount routines must call throttle_info_mount_rel in their unmount
- * routines. 
+ * routines.
  */
-void 
-throttle_info_mount_ref(mount_t mp, void *throttle_info)
+void
+throttle_info_mount_ref(mount_t mp, void * throttle_info)
 {
 	if ((throttle_info == NULL) || (mp == NULL))
 		return;
@@ -1485,18 +1488,18 @@ throttle_info_mount_ref(mount_t mp, void *throttle_info)
  * handle must be released by throttle_info_rel_by_mask
  */
 int
-throttle_info_ref_by_mask(uint64_t throttle_mask, throttle_info_handle_t *throttle_info_handle)
+throttle_info_ref_by_mask(uint64_t throttle_mask, throttle_info_handle_t * throttle_info_handle)
 {
-	int	dev_index;
-	struct _throttle_io_info_t *info;
+	int dev_index;
+	struct _throttle_io_info_t * info;
 
 	if (throttle_info_handle == NULL)
 		return EINVAL;
-	
+
 	dev_index = num_trailing_0(throttle_mask);
-	info = &_throttle_io_info[dev_index];
+	info      = &_throttle_io_info[dev_index];
 	throttle_info_ref(info);
-	*(struct _throttle_io_info_t**)throttle_info_handle = info;
+	*(struct _throttle_io_info_t **)throttle_info_handle = info;
 
 	return 0;
 }
@@ -1512,7 +1515,7 @@ throttle_info_rel_by_mask(throttle_info_handle_t throttle_info_handle)
 	/*
 	 * for now the handle is just a pointer to _throttle_io_info_t
 	 */
-	throttle_info_rel((struct _throttle_io_info_t*)throttle_info_handle);
+	throttle_info_rel((struct _throttle_io_info_t *)throttle_info_handle);
 }
 
 /*
@@ -1520,7 +1523,7 @@ throttle_info_rel_by_mask(throttle_info_handle_t throttle_info_handle)
  *
  * File Systems that throttle_info_mount_ref, must call this routine in their
  * umount routine.
- */ 
+ */
 void
 throttle_info_mount_rel(mount_t mp)
 {
@@ -1538,7 +1541,7 @@ throttle_info_mount_rel(mount_t mp)
 void
 throttle_info_mount_reset_period(mount_t mp, int isssd)
 {
-	struct _throttle_io_info_t *info;
+	struct _throttle_io_info_t * info;
 
 	if (mp == NULL)
 		info = &_throttle_io_info[LOWPRI_MAX_NUM_DEV - 1];
@@ -1551,9 +1554,9 @@ throttle_info_mount_reset_period(mount_t mp, int isssd)
 }
 
 void
-throttle_info_get_last_io_time(mount_t mp, struct timeval *tv)
+throttle_info_get_last_io_time(mount_t mp, struct timeval * tv)
 {
-    	struct _throttle_io_info_t *info;
+	struct _throttle_io_info_t * info;
 
 	if (mp == NULL)
 		info = &_throttle_io_info[LOWPRI_MAX_NUM_DEV - 1];
@@ -1568,8 +1571,8 @@ throttle_info_get_last_io_time(mount_t mp, struct timeval *tv)
 void
 update_last_io_time(mount_t mp)
 {
-    	struct _throttle_io_info_t *info;
-		
+	struct _throttle_io_info_t * info;
+
 	if (mp == NULL)
 		info = &_throttle_io_info[LOWPRI_MAX_NUM_DEV - 1];
 	else if (mp->mnt_throttle_info == NULL)
@@ -1583,7 +1586,7 @@ update_last_io_time(mount_t mp)
 }
 
 int
-throttle_get_io_policy(uthread_t *ut)
+throttle_get_io_policy(uthread_t * ut)
 {
 	if (ut != NULL)
 		*ut = get_bsdthread_info(current_thread());
@@ -1592,7 +1595,7 @@ throttle_get_io_policy(uthread_t *ut)
 }
 
 int
-throttle_get_passive_io_policy(uthread_t *ut)
+throttle_get_passive_io_policy(uthread_t * ut)
 {
 	if (ut != NULL)
 		*ut = get_bsdthread_info(current_thread());
@@ -1600,12 +1603,11 @@ throttle_get_passive_io_policy(uthread_t *ut)
 	return (proc_get_effective_thread_policy(current_thread(), TASK_POLICY_PASSIVE_IO));
 }
 
-
 static int
 throttle_get_thread_throttle_level(uthread_t ut)
 {
-	uthread_t *ut_p = (ut == NULL) ? &ut : NULL;
-	int io_tier = throttle_get_io_policy(ut_p);
+	uthread_t * ut_p = (ut == NULL) ? &ut : NULL;
+	int io_tier      = throttle_get_io_policy(ut_p);
 
 	return throttle_get_thread_throttle_level_internal(ut, io_tier);
 }
@@ -1614,7 +1616,8 @@ throttle_get_thread_throttle_level(uthread_t ut)
  * Return a throttle level given an existing I/O tier (such as returned by throttle_get_io_policy)
  */
 static int
-throttle_get_thread_throttle_level_internal(uthread_t ut, int io_tier) {
+throttle_get_thread_throttle_level_internal(uthread_t ut, int io_tier)
+{
 	int thread_throttle_level = io_tier;
 	int user_idle_level;
 
@@ -1651,12 +1654,12 @@ throttle_get_thread_throttle_level_internal(uthread_t ut, int io_tier) {
 static int
 throttle_io_will_be_throttled_internal(void * throttle_info, int * mylevel, int * throttling_level)
 {
-    	struct _throttle_io_info_t *info = throttle_info;
+	struct _throttle_io_info_t * info = throttle_info;
 	struct timeval elapsed;
 	struct timeval now;
 	uint64_t elapsed_msecs;
-	int	thread_throttle_level;
-	int	throttle_level;
+	int thread_throttle_level;
+	int throttle_level;
 
 	if ((thread_throttle_level = throttle_get_thread_throttle_level(NULL)) < THROTTLE_LEVEL_THROTTLED)
 		return (THROTTLE_DISENGAGED);
@@ -1701,7 +1704,7 @@ throttle_io_will_be_throttled_internal(void * throttle_info, int * mylevel, int 
 	return (THROTTLE_ENGAGED);
 }
 
-/* 
+/*
  * If we have a mount point and it has a throttle info pointer then
  * use it to do the check, otherwise use the device unit number to find
  * the correct throttle info array element.
@@ -1709,17 +1712,17 @@ throttle_io_will_be_throttled_internal(void * throttle_info, int * mylevel, int 
 int
 throttle_io_will_be_throttled(__unused int lowpri_window_msecs, mount_t mp)
 {
-    	struct _throttle_io_info_t	*info;
+	struct _throttle_io_info_t * info;
 
 	/*
 	 * Should we just return zero if no mount point
 	 */
 	if (mp == NULL)
-	        info = &_throttle_io_info[LOWPRI_MAX_NUM_DEV - 1];
+		info = &_throttle_io_info[LOWPRI_MAX_NUM_DEV - 1];
 	else if (mp->mnt_throttle_info == NULL)
-	        info = &_throttle_io_info[mp->mnt_devbsdunit];
+		info = &_throttle_io_info[mp->mnt_devbsdunit];
 	else
-	        info = mp->mnt_throttle_info;
+		info = mp->mnt_throttle_info;
 
 	if (info->throttle_is_fusion_with_priority) {
 		uthread_t ut = get_bsdthread_info(current_thread());
@@ -1733,11 +1736,11 @@ throttle_io_will_be_throttled(__unused int lowpri_window_msecs, mount_t mp)
 		return throttle_io_will_be_throttled_internal(info, NULL, NULL);
 }
 
-/* 
+/*
  * Routine to increment I/O throttling counters maintained in the proc
  */
 
-static void 
+static void
 throttle_update_proc_stats(pid_t throttling_pid, int count)
 {
 	proc_t throttling_proc;
@@ -1745,7 +1748,7 @@ throttle_update_proc_stats(pid_t throttling_pid, int count)
 
 	/* The throttled_proc is always the current proc; so we are not concerned with refs */
 	OSAddAtomic64(count, &(throttled_proc->was_throttled));
-	
+
 	/* The throttling pid might have exited by now */
 	throttling_proc = proc_find(throttling_pid);
 	if (throttling_proc != PROC_NULL) {
@@ -1763,13 +1766,13 @@ uint32_t
 throttle_lowpri_io(int sleep_amount)
 {
 	uthread_t ut;
-	struct _throttle_io_info_t *info;
-	int	throttle_type = 0;
-	int	mylevel = 0;
-	int	throttling_level = THROTTLE_LEVEL_NONE;
-	int	sleep_cnt = 0;
-	uint32_t  throttle_io_period_num = 0;
-	boolean_t insert_tail = TRUE;
+	struct _throttle_io_info_t * info;
+	int throttle_type               = 0;
+	int mylevel                     = 0;
+	int throttling_level            = THROTTLE_LEVEL_NONE;
+	int sleep_cnt                   = 0;
+	uint32_t throttle_io_period_num = 0;
+	boolean_t insert_tail           = TRUE;
 	boolean_t s;
 
 	ut = get_bsdthread_info(current_thread());
@@ -1780,7 +1783,7 @@ throttle_lowpri_io(int sleep_amount)
 	info = ut->uu_throttle_info;
 
 	if (info == NULL) {
-		ut->uu_throttle_bc = false;
+		ut->uu_throttle_bc   = false;
 		ut->uu_lowpri_window = 0;
 		return (0);
 	}
@@ -1797,11 +1800,10 @@ throttle_lowpri_io(int sleep_amount)
 
 	ut->uu_was_rethrottled = false;
 
-	while ( (throttle_type = throttle_io_will_be_throttled_internal(info, &mylevel, &throttling_level)) ) {
-
+	while ((throttle_type = throttle_io_will_be_throttled_internal(info, &mylevel, &throttling_level))) {
 		if (throttle_type == THROTTLE_ENGAGED) {
 			if (sleep_amount == 0)
-				break;			
+				break;
 			if (info->throttle_io_period_num < throttle_io_period_num)
 				break;
 			if ((info->throttle_io_period_num - throttle_io_period_num) >= (uint32_t)sleep_amount)
@@ -1820,7 +1822,7 @@ throttle_lowpri_io(int sleep_amount)
 			 */
 			TAILQ_REMOVE(&info->throttle_uthlist[ut->uu_on_throttlelist], ut, uu_throttlelist);
 			ut->uu_on_throttlelist = THROTTLE_LEVEL_NONE;
-			insert_tail = TRUE;
+			insert_tail            = TRUE;
 		}
 		if (ut->uu_on_throttlelist < THROTTLE_LEVEL_THROTTLED) {
 			if (throttle_add_to_list(info, ut, mylevel, insert_tail) == THROTTLE_LEVEL_END)
@@ -1836,7 +1838,6 @@ throttle_lowpri_io(int sleep_amount)
 		 * with "rethrottle_thread"
 		 */
 		if (ut->uu_was_rethrottled) {
-
 			lck_spin_unlock(&ut->uu_rethrottle_lock);
 			ml_set_interrupts_enabled(s);
 			lck_mtx_yield(&info->throttle_lock);
@@ -1847,11 +1848,11 @@ throttle_lowpri_io(int sleep_amount)
 			continue;
 		}
 		KERNEL_DEBUG_CONSTANT((FSDBG_CODE(DBG_THROTTLE, PROCESS_THROTTLED)) | DBG_FUNC_NONE,
-				info->throttle_last_IO_pid[throttling_level], throttling_level, proc_selfpid(), mylevel, 0);
-		
+		                      info->throttle_last_IO_pid[throttling_level], throttling_level, proc_selfpid(), mylevel, 0);
+
 		if (sleep_cnt == 0) {
-			KERNEL_DEBUG_CONSTANT((FSDBG_CODE(DBG_FSRW, 97)) | DBG_FUNC_START,
-					      throttle_windows_msecs[mylevel], info->throttle_io_periods[mylevel], info->throttle_io_count, 0, 0);
+			KERNEL_DEBUG_CONSTANT((FSDBG_CODE(DBG_FSRW, 97)) | DBG_FUNC_START, throttle_windows_msecs[mylevel],
+			                      info->throttle_io_periods[mylevel], info->throttle_io_count, 0, 0);
 			throttled_count[mylevel]++;
 		}
 		ut->uu_wmesg = "throttle_lowpri_io";
@@ -1868,18 +1869,18 @@ throttle_lowpri_io(int sleep_amount)
 
 		ut->uu_wmesg = NULL;
 
-		ut->uu_is_throttled = false;
+		ut->uu_is_throttled    = false;
 		ut->uu_was_rethrottled = false;
 
 		lck_mtx_lock(&info->throttle_lock);
 
 		sleep_cnt++;
-		
+
 		if (sleep_amount == 0)
 			insert_tail = FALSE;
 		else if (info->throttle_io_period_num < throttle_io_period_num ||
-			 (info->throttle_io_period_num - throttle_io_period_num) >= (uint32_t)sleep_amount) {
-			insert_tail = FALSE;
+		         (info->throttle_io_period_num - throttle_io_period_num) >= (uint32_t)sleep_amount) {
+			insert_tail  = FALSE;
 			sleep_amount = 0;
 		}
 	}
@@ -1891,19 +1892,19 @@ done:
 	lck_mtx_unlock(&info->throttle_lock);
 
 	if (sleep_cnt) {
-		KERNEL_DEBUG_CONSTANT((FSDBG_CODE(DBG_FSRW, 97)) | DBG_FUNC_END,
-				      throttle_windows_msecs[mylevel], info->throttle_io_periods[mylevel], info->throttle_io_count, 0, 0);
+		KERNEL_DEBUG_CONSTANT((FSDBG_CODE(DBG_FSRW, 97)) | DBG_FUNC_END, throttle_windows_msecs[mylevel],
+		                      info->throttle_io_periods[mylevel], info->throttle_io_count, 0, 0);
 		/*
 		 * We update the stats for the last pid which opened a throttle window for the throttled thread.
 		 * This might not be completely accurate since the multiple throttles seen by the lower tier pid
-		 * might have been caused by various higher prio pids. However, updating these stats accurately 
+		 * might have been caused by various higher prio pids. However, updating these stats accurately
 		 * means doing a proc_find while holding the throttle lock which leads to deadlock.
 		 */
 		throttle_update_proc_stats(info->throttle_last_IO_pid[throttling_level], sleep_cnt);
 	}
 
 	ut->uu_throttle_info = NULL;
-	ut->uu_throttle_bc = false;
+	ut->uu_throttle_bc   = false;
 	ut->uu_lowpri_window = 0;
 
 	throttle_info_rel(info);
@@ -1919,34 +1920,37 @@ done:
  *
  * explanations about these policies are in the man page of setiopolicy_np
  */
-void throttle_set_thread_io_policy(int policy)
+void
+throttle_set_thread_io_policy(int policy)
 {
 	proc_set_thread_policy(current_thread(), TASK_POLICY_INTERNAL, TASK_POLICY_IOPOL, policy);
 }
 
-int throttle_get_thread_effective_io_policy()
+int
+throttle_get_thread_effective_io_policy()
 {
 	return proc_get_effective_thread_policy(current_thread(), TASK_POLICY_IO);
 }
 
-void throttle_info_reset_window(uthread_t ut)
+void
+throttle_info_reset_window(uthread_t ut)
 {
-	struct _throttle_io_info_t *info;
+	struct _throttle_io_info_t * info;
 
-	if (ut == NULL) 
+	if (ut == NULL)
 		ut = get_bsdthread_info(current_thread());
 
-	if ( (info = ut->uu_throttle_info) ) {
+	if ((info = ut->uu_throttle_info)) {
 		throttle_info_rel(info);
 
 		ut->uu_throttle_info = NULL;
 		ut->uu_lowpri_window = 0;
-		ut->uu_throttle_bc = false;
+		ut->uu_throttle_bc   = false;
 	}
 }
 
-static
-void throttle_info_set_initial_window(uthread_t ut, struct _throttle_io_info_t *info, boolean_t BC_throttle, boolean_t isssd)
+static void
+throttle_info_set_initial_window(uthread_t ut, struct _throttle_io_info_t * info, boolean_t BC_throttle, boolean_t isssd)
 {
 	if (lowpri_throttle_enabled == 0 || info->throttle_disabled)
 		return;
@@ -1955,13 +1959,12 @@ void throttle_info_set_initial_window(uthread_t ut, struct _throttle_io_info_t *
 		throttle_init_throttle_period(info, isssd);
 	}
 	if (ut->uu_throttle_info == NULL) {
-
 		ut->uu_throttle_info = info;
 		throttle_info_ref(info);
-		DEBUG_ALLOC_THROTTLE_INFO("updating info = %p\n", info, info );
+		DEBUG_ALLOC_THROTTLE_INFO("updating info = %p\n", info, info);
 
 		ut->uu_lowpri_window = 1;
-		ut->uu_throttle_bc = BC_throttle;
+		ut->uu_throttle_bc   = BC_throttle;
 	}
 }
 
@@ -1971,10 +1974,12 @@ void throttle_info_set_initial_window(uthread_t ut, struct _throttle_io_info_t *
  *
  * Only affects IO that was sent through spec_strategy
  */
-void throttle_info_end_io(buf_t bp) {
+void
+throttle_info_end_io(buf_t bp)
+{
 	mount_t mp;
-	struct bufattr *bap;
-	struct _throttle_io_info_t *info;
+	struct bufattr * bap;
+	struct _throttle_io_info_t * info;
 	int io_tier;
 
 	bap = &bp->b_attr;
@@ -2001,8 +2006,9 @@ void throttle_info_end_io(buf_t bp) {
 /*
  * Decrement inflight count initially incremented by throttle_info_update_internal
  */
-static
-void throttle_info_end_io_internal(struct _throttle_io_info_t *info, int throttle_level) {
+static void
+throttle_info_end_io_internal(struct _throttle_io_info_t * info, int throttle_level)
+{
 	if (throttle_level == THROTTLE_LEVEL_NONE) {
 		return;
 	}
@@ -2016,10 +2022,11 @@ void throttle_info_end_io_internal(struct _throttle_io_info_t *info, int throttl
  * If inflight is TRUE and bap is NULL then the caller is responsible for calling
  * throttle_info_end_io_internal to avoid leaking in-flight I/O.
  */
-static
-int throttle_info_update_internal(struct _throttle_io_info_t *info, uthread_t ut, int flags, boolean_t isssd, boolean_t inflight, struct bufattr *bap)
+static int
+throttle_info_update_internal(
+    struct _throttle_io_info_t * info, uthread_t ut, int flags, boolean_t isssd, boolean_t inflight, struct bufattr * bap)
 {
-	int	thread_throttle_level;
+	int thread_throttle_level;
 
 	if (lowpri_throttle_enabled == 0 || info->throttle_disabled)
 		return THROTTLE_LEVEL_NONE;
@@ -2037,7 +2044,7 @@ int throttle_info_update_internal(struct _throttle_io_info_t *info, uthread_t ut
 	}
 
 	if (thread_throttle_level != THROTTLE_LEVEL_NONE) {
-        if(!ISSET(flags, B_PASSIVE)) {
+		if (!ISSET(flags, B_PASSIVE)) {
 			info->throttle_last_IO_pid[thread_throttle_level] = proc_selfpid();
 			if (inflight && !ut->uu_throttle_bc) {
 				if (NULL != bap) {
@@ -2047,12 +2054,11 @@ int throttle_info_update_internal(struct _throttle_io_info_t *info, uthread_t ut
 			} else {
 				microuptime(&info->throttle_window_start_timestamp[thread_throttle_level]);
 			}
-			KERNEL_DEBUG_CONSTANT((FSDBG_CODE(DBG_THROTTLE, OPEN_THROTTLE_WINDOW)) | DBG_FUNC_NONE,
-					current_proc()->p_pid, thread_throttle_level, 0, 0, 0);
+			KERNEL_DEBUG_CONSTANT((FSDBG_CODE(DBG_THROTTLE, OPEN_THROTTLE_WINDOW)) | DBG_FUNC_NONE, current_proc()->p_pid,
+			                      thread_throttle_level, 0, 0, 0);
 		}
 		microuptime(&info->throttle_last_IO_timestamp[thread_throttle_level]);
 	}
-
 
 	if (thread_throttle_level >= THROTTLE_LEVEL_THROTTLED) {
 		/*
@@ -2065,7 +2071,7 @@ int throttle_info_update_internal(struct _throttle_io_info_t *info, uthread_t ut
 		 * do the delay just before we return from the system
 		 * call that triggered this I/O or from vnode_pagein
 		 */
-	        OSAddAtomic(1, &info->throttle_io_count);
+		OSAddAtomic(1, &info->throttle_io_count);
 
 		throttle_info_set_initial_window(ut, info, FALSE, isssd);
 	}
@@ -2073,9 +2079,10 @@ int throttle_info_update_internal(struct _throttle_io_info_t *info, uthread_t ut
 	return thread_throttle_level;
 }
 
-void *throttle_info_update_by_mount(mount_t mp)
+void *
+throttle_info_update_by_mount(mount_t mp)
 {
-	struct _throttle_io_info_t *info;
+	struct _throttle_io_info_t * info;
 	uthread_t ut;
 	boolean_t isssd = FALSE;
 
@@ -2094,16 +2101,16 @@ void *throttle_info_update_by_mount(mount_t mp)
 	return info;
 }
 
-
 /*
  * KPI routine
  *
  * this is usually called before every I/O, used for throttled I/O
  * book keeping.  This routine has low overhead and does not sleep
  */
-void throttle_info_update(void *throttle_info, int flags)
+void
+throttle_info_update(void * throttle_info, int flags)
 {
-        if (throttle_info)
+	if (throttle_info)
 		throttle_info_update_internal(throttle_info, NULL, flags, FALSE, FALSE, NULL);
 }
 
@@ -2113,9 +2120,10 @@ void throttle_info_update(void *throttle_info, int flags)
  * this is usually called before every I/O, used for throttled I/O
  * book keeping.  This routine has low overhead and does not sleep
  */
-void throttle_info_update_by_mask(void *throttle_info_handle, int flags)
+void
+throttle_info_update_by_mask(void * throttle_info_handle, int flags)
 {
-	void *throttle_info = throttle_info_handle;
+	void * throttle_info = throttle_info_handle;
 
 	/*
 	 * for now we only use the lowest bit of the throttle mask, so the
@@ -2127,16 +2135,17 @@ void throttle_info_update_by_mask(void *throttle_info_handle, int flags)
 }
 /*
  * KPI routine
- * 
- * This routine marks the throttle info as disabled. Used for mount points which 
+ *
+ * This routine marks the throttle info as disabled. Used for mount points which
  * support I/O scheduling.
  */
 
-void throttle_info_disable_throttle(int devno, boolean_t isfusion)
+void
+throttle_info_disable_throttle(int devno, boolean_t isfusion)
 {
-	struct _throttle_io_info_t *info;
+	struct _throttle_io_info_t * info;
 
-	if (devno < 0 || devno >= LOWPRI_MAX_NUM_DEV) 
+	if (devno < 0 || devno >= LOWPRI_MAX_NUM_DEV)
 		panic("Illegal devno (%d) passed into throttle_info_disable_throttle()", devno);
 
 	info = &_throttle_io_info[devno];
@@ -2148,34 +2157,33 @@ void throttle_info_disable_throttle(int devno, boolean_t isfusion)
 	}
 	info->throttle_disabled = !info->throttle_is_fusion_with_priority;
 	return;
-} 
-
+}
 
 /*
  * KPI routine (private)
  * Called to determine if this IO is being throttled to this level so that it can be treated specially
  */
-int throttle_info_io_will_be_throttled(void * throttle_info, int policy)
+int
+throttle_info_io_will_be_throttled(void * throttle_info, int policy)
 {
-    	struct _throttle_io_info_t *info = throttle_info;
+	struct _throttle_io_info_t * info = throttle_info;
 	struct timeval elapsed;
 	uint64_t elapsed_msecs;
-	int	throttle_level;
-	int	thread_throttle_level;
+	int throttle_level;
+	int thread_throttle_level;
 
-        switch (policy) {
-
-        case IOPOL_THROTTLE:
-                thread_throttle_level = THROTTLE_LEVEL_TIER3;
-                break;
-        case IOPOL_UTILITY:
-                thread_throttle_level = THROTTLE_LEVEL_TIER2;
-                break;
-        case IOPOL_STANDARD:
-                thread_throttle_level = THROTTLE_LEVEL_TIER1;
-                break;
-        default:
-                thread_throttle_level = THROTTLE_LEVEL_TIER0;
+	switch (policy) {
+	case IOPOL_THROTTLE:
+		thread_throttle_level = THROTTLE_LEVEL_TIER3;
+		break;
+	case IOPOL_UTILITY:
+		thread_throttle_level = THROTTLE_LEVEL_TIER2;
+		break;
+	case IOPOL_STANDARD:
+		thread_throttle_level = THROTTLE_LEVEL_TIER1;
+		break;
+	default:
+		thread_throttle_level = THROTTLE_LEVEL_TIER0;
 		break;
 	}
 	for (throttle_level = THROTTLE_LEVEL_START; throttle_level < thread_throttle_level; throttle_level++) {
@@ -2203,61 +2211,61 @@ int throttle_info_io_will_be_throttled(void * throttle_info, int policy)
 	return (THROTTLE_ENGAGED);
 }
 
-int throttle_lowpri_window(void)
+int
+throttle_lowpri_window(void)
 {
-	struct uthread *ut = get_bsdthread_info(current_thread());
+	struct uthread * ut = get_bsdthread_info(current_thread());
 	return ut->uu_lowpri_window;
 }
-
 
 #if CONFIG_IOSCHED
 int upl_get_cached_tier(void *);
 #endif
 
 int
-spec_strategy(struct vnop_strategy_args *ap)
+spec_strategy(struct vnop_strategy_args * ap)
 {
-	buf_t	bp;
-	int	bflags;
-	int	io_tier;
-	int	passive;
-	dev_t	bdev;
+	buf_t bp;
+	int bflags;
+	int io_tier;
+	int passive;
+	dev_t bdev;
 	uthread_t ut;
 	mount_t mp;
-	struct	bufattr *bap;
-	int	strategy_ret;
-	struct _throttle_io_info_t *throttle_info;
-	boolean_t isssd = FALSE;
+	struct bufattr * bap;
+	int strategy_ret;
+	struct _throttle_io_info_t * throttle_info;
+	boolean_t isssd    = FALSE;
 	boolean_t inflight = FALSE;
-	boolean_t upgrade = FALSE;
-	int code = 0;
+	boolean_t upgrade  = FALSE;
+	int code           = 0;
 
 #if !CONFIG_EMBEDDED
 	proc_t curproc = current_proc();
 #endif /* !CONFIG_EMBEDDED */
 
-        bp = ap->a_bp;
+	bp   = ap->a_bp;
 	bdev = buf_device(bp);
-	mp = buf_vnode(bp)->v_mount;
-	bap = &bp->b_attr;
+	mp   = buf_vnode(bp)->v_mount;
+	bap  = &bp->b_attr;
 
 #if CONFIG_IOSCHED
-       if (bp->b_flags & B_CLUSTER) {
+	if (bp->b_flags & B_CLUSTER) {
+		io_tier = upl_get_cached_tier(bp->b_upl);
 
-               io_tier = upl_get_cached_tier(bp->b_upl);
-
-               if (io_tier == -1)
-                       io_tier = throttle_get_io_policy(&ut);
+		if (io_tier == -1)
+			io_tier = throttle_get_io_policy(&ut);
 #if DEVELOPMENT || DEBUG
-               else {
-                       int my_io_tier = throttle_get_io_policy(&ut);
+		else {
+			int my_io_tier = throttle_get_io_policy(&ut);
 
-                       if (io_tier != my_io_tier)
-                               KERNEL_DEBUG_CONSTANT((FSDBG_CODE(DBG_THROTTLE, IO_TIER_UPL_MISMATCH)) | DBG_FUNC_NONE, buf_kernel_addrperm_addr(bp), my_io_tier, io_tier, 0, 0);
-               }
+			if (io_tier != my_io_tier)
+				KERNEL_DEBUG_CONSTANT((FSDBG_CODE(DBG_THROTTLE, IO_TIER_UPL_MISMATCH)) | DBG_FUNC_NONE,
+				                      buf_kernel_addrperm_addr(bp), my_io_tier, io_tier, 0, 0);
+		}
 #endif
-       } else
-               io_tier = throttle_get_io_policy(&ut);
+	} else
+		io_tier = throttle_get_io_policy(&ut);
 #else
 	io_tier = throttle_get_io_policy(&ut);
 #endif
@@ -2273,7 +2281,7 @@ spec_strategy(struct vnop_strategy_args *ap)
 		if (!(mp->mnt_ioflags & MNT_IOFLAGS_IOSCHED_SUPPORTED)) {
 			upgrade = TRUE;
 		}
-#else /* CONFIG_IOSCHED */
+#else  /* CONFIG_IOSCHED */
 		upgrade = TRUE;
 #endif /* CONFIG_IOSCHED */
 	}
@@ -2282,7 +2290,7 @@ spec_strategy(struct vnop_strategy_args *ap)
 		bap->ba_flags |= BA_META;
 
 #if CONFIG_IOSCHED
-	/* 
+	/*
 	 * For I/O Scheduling, we currently do not have a way to track and expedite metadata I/Os.
 	 * To ensure we dont get into priority inversions due to metadata I/Os, we use the following rules:
 	 * For metadata reads, ceil all I/Os to IOSCHED_METADATA_TIER & mark them passive if the I/O tier was upgraded
@@ -2302,7 +2310,7 @@ spec_strategy(struct vnop_strategy_args *ap)
 		}
 	}
 #endif /* CONFIG_IOSCHED */
-			
+
 	SET_BUFATTR_IO_TIER(bap, io_tier);
 
 	if (passive) {
@@ -2314,21 +2322,21 @@ spec_strategy(struct vnop_strategy_args *ap)
 	if ((curproc != NULL) && ((curproc->p_flag & P_DELAYIDLESLEEP) == P_DELAYIDLESLEEP))
 		bap->ba_flags |= BA_DELAYIDLESLEEP;
 #endif /* !CONFIG_EMBEDDED */
-		
+
 	bflags = bp->b_flags;
 
 	if (((bflags & B_READ) == 0) && ((bflags & B_ASYNC) == 0))
 		bufattr_markquickcomplete(bap);
 
 	if (bflags & B_READ)
-	        code |= DKIO_READ;
+		code |= DKIO_READ;
 	if (bflags & B_ASYNC)
-	        code |= DKIO_ASYNC;
+		code |= DKIO_ASYNC;
 
 	if (bap->ba_flags & BA_META)
-	        code |= DKIO_META;
+		code |= DKIO_META;
 	else if (bflags & B_PAGEIO)
-	        code |= DKIO_PAGING;
+		code |= DKIO_PAGING;
 
 	if (io_tier != 0)
 		code |= DKIO_THROTTLE;
@@ -2347,9 +2355,9 @@ spec_strategy(struct vnop_strategy_args *ap)
 	}
 
 	if (kdebug_enable) {
-		KERNEL_DEBUG_CONSTANT_IST(KDEBUG_COMMON, FSDBG_CODE(DBG_DKRW, code) | DBG_FUNC_NONE,
-					  buf_kernel_addrperm_addr(bp), bdev, buf_blkno(bp), buf_count(bp), 0);
-        }
+		KERNEL_DEBUG_CONSTANT_IST(KDEBUG_COMMON, FSDBG_CODE(DBG_DKRW, code) | DBG_FUNC_NONE, buf_kernel_addrperm_addr(bp), bdev,
+		                          buf_blkno(bp), buf_count(bp), 0);
+	}
 
 	thread_update_io_stats(current_thread(), buf_count(bp), code);
 
@@ -2396,22 +2404,22 @@ spec_strategy(struct vnop_strategy_args *ap)
 	 * the boot cache too often.
 	 *
 	 * Note that typical strategy routines are defined with
-	 * a void return so we'll get garbage here. In the 
+	 * a void return so we'll get garbage here. In the
 	 * unlikely case the garbage matches our special return
 	 * value, it's not a big deal since we're only adjusting
 	 * the throttling delay.
- 	 */
-#define IO_SATISFIED_BY_CACHE  ((int)0xcafefeed)
+	 */
+#define IO_SATISFIED_BY_CACHE ((int)0xcafefeed)
 #define IO_SHOULD_BE_THROTTLED ((int)0xcafebeef)
-	typedef	int strategy_fcn_ret_t(struct buf *bp);
-	
-	strategy_ret = (*(strategy_fcn_ret_t*)bdevsw[major(bdev)].d_strategy)(bp);
+	typedef int strategy_fcn_ret_t(struct buf * bp);
+
+	strategy_ret = (*(strategy_fcn_ret_t *)bdevsw[major(bdev)].d_strategy)(bp);
 
 	// disk conditioner needs to track when this I/O actually starts
 	// which means track it after `strategy` which may include delays
 	// from inflight I/Os
 	microuptime(&bp->b_timestamp_tv);
-	
+
 	if (IO_SATISFIED_BY_CACHE == strategy_ret) {
 		/*
 		 * If this was a throttled IO satisfied by the boot cache,
@@ -2429,32 +2437,29 @@ spec_strategy(struct vnop_strategy_args *ap)
 	return (0);
 }
 
-
 /*
  * This is a noop, simply returning what one has been given.
  */
 int
-spec_blockmap(__unused struct vnop_blockmap_args *ap)
+spec_blockmap(__unused struct vnop_blockmap_args * ap)
 {
 	return (ENOTSUP);
 }
-
 
 /*
  * Device close routine
  */
 int
-spec_close(struct vnop_close_args *ap)
+spec_close(struct vnop_close_args * ap)
 {
-	struct vnode *vp = ap->a_vp;
-	dev_t dev = vp->v_rdev;
-	int error = 0;
-	int flags = ap->a_fflag;
-	struct proc *p = vfs_context_proc(ap->a_context);
-	struct session *sessp;
+	struct vnode * vp = ap->a_vp;
+	dev_t dev         = vp->v_rdev;
+	int error         = 0;
+	int flags         = ap->a_fflag;
+	struct proc * p   = vfs_context_proc(ap->a_context);
+	struct session * sessp;
 
 	switch (vp->v_type) {
-
 	case VCHR:
 		/*
 		 * Hack: a tty device that is a controlling terminal
@@ -2469,17 +2474,17 @@ spec_close(struct vnop_close_args *ap)
 		devsw_lock(dev, S_IFCHR);
 		if (sessp != SESSION_NULL) {
 			if (vp == sessp->s_ttyvp && vcount(vp) == 1) {
-				struct tty *tp = TTY_NULL;
+				struct tty * tp = TTY_NULL;
 
 				devsw_unlock(dev, S_IFCHR);
 				session_lock(sessp);
 				if (vp == sessp->s_ttyvp) {
-					tp = SESSION_TP(sessp);
-					sessp->s_ttyvp = NULL;
-					sessp->s_ttyvid = 0;
-					sessp->s_ttyp = TTY_NULL;
+					tp                 = SESSION_TP(sessp);
+					sessp->s_ttyvp     = NULL;
+					sessp->s_ttyvid    = 0;
+					sessp->s_ttyp      = TTY_NULL;
 					sessp->s_ttypgrpid = NO_PID;
-				} 
+				}
 				session_unlock(sessp);
 
 				if (tp != TTY_NULL) {
@@ -2529,8 +2534,8 @@ spec_close(struct vnop_close_args *ap)
 		 * we must invalidate any in core blocks, so that
 		 * we can, for instance, change floppy disks.
 		 */
-	        if ((error = spec_fsync_internal(vp, MNT_WAIT, ap->a_context)))
-		        return (error);
+		if ((error = spec_fsync_internal(vp, MNT_WAIT, ap->a_context)))
+			return (error);
 
 		error = buf_invalidateblks(vp, BUF_WRITE_DATA, 0, 0);
 		if (error)
@@ -2549,7 +2554,7 @@ spec_close(struct vnop_close_args *ap)
 
 	default:
 		panic("spec_close: not special");
-		return(EBADF);
+		return (EBADF);
 	}
 
 	return error;
@@ -2559,9 +2564,8 @@ spec_close(struct vnop_close_args *ap)
  * Return POSIX pathconf information applicable to special devices.
  */
 int
-spec_pathconf(struct vnop_pathconf_args *ap)
+spec_pathconf(struct vnop_pathconf_args * ap)
 {
-
 	switch (ap->a_name) {
 	case _PC_LINK_MAX:
 		*ap->a_retval = LINK_MAX;
@@ -2576,7 +2580,7 @@ spec_pathconf(struct vnop_pathconf_args *ap)
 		*ap->a_retval = PIPE_BUF;
 		return (0);
 	case _PC_CHOWN_RESTRICTED:
-		*ap->a_retval = 200112;		/* _POSIX_CHOWN_RESTRICTED */
+		*ap->a_retval = 200112; /* _POSIX_CHOWN_RESTRICTED */
 		return (0);
 	case _PC_VDISABLE:
 		*ap->a_retval = _POSIX_VDISABLE;
@@ -2591,17 +2595,16 @@ spec_pathconf(struct vnop_pathconf_args *ap)
  * Special device failed operation
  */
 int
-spec_ebadf(__unused void *dummy)
+spec_ebadf(__unused void * dummy)
 {
-
 	return (EBADF);
 }
 
 /* Blktooff derives file offset from logical block number */
 int
-spec_blktooff(struct vnop_blktooff_args *ap)
+spec_blktooff(struct vnop_blktooff_args * ap)
 {
-	struct vnode *vp = ap->a_vp;
+	struct vnode * vp = ap->a_vp;
 
 	switch (vp->v_type) {
 	case VCHR:
@@ -2623,9 +2626,9 @@ spec_blktooff(struct vnop_blktooff_args *ap)
 
 /* Offtoblk derives logical block number from file offset */
 int
-spec_offtoblk(struct vnop_offtoblk_args *ap)
+spec_offtoblk(struct vnop_offtoblk_args * ap)
 {
-	struct vnode *vp = ap->a_vp;
+	struct vnode * vp = ap->a_vp;
 
 	switch (vp->v_type) {
 	case VCHR:
@@ -2645,22 +2648,20 @@ spec_offtoblk(struct vnop_offtoblk_args *ap)
 	return (0);
 }
 
-static void filt_specdetach(struct knote *kn);
-static int filt_specevent(struct knote *kn, long hint);
-static int filt_spectouch(struct knote *kn, struct kevent_internal_s *kev);
-static int filt_specprocess(struct knote *kn, struct filt_process_s *data, struct kevent_internal_s *kev);
-static int filt_specpeek(struct knote *kn);
+static void filt_specdetach(struct knote * kn);
+static int filt_specevent(struct knote * kn, long hint);
+static int filt_spectouch(struct knote * kn, struct kevent_internal_s * kev);
+static int filt_specprocess(struct knote * kn, struct filt_process_s * data, struct kevent_internal_s * kev);
+static int filt_specpeek(struct knote * kn);
 
-SECURITY_READ_ONLY_EARLY(struct filterops) spec_filtops = {
-	.f_isfd    = 1,
-	.f_attach  = filt_specattach,
-	.f_detach  = filt_specdetach,
-	.f_event   = filt_specevent,
-	.f_touch   = filt_spectouch,
-	.f_process = filt_specprocess,
-	.f_peek    = filt_specpeek
-};
-
+SECURITY_READ_ONLY_EARLY(struct filterops)
+spec_filtops = {.f_isfd    = 1,
+                .f_attach  = filt_specattach,
+                .f_detach  = filt_specdetach,
+                .f_event   = filt_specevent,
+                .f_touch   = filt_spectouch,
+                .f_process = filt_specprocess,
+                .f_peek    = filt_specpeek};
 
 /*
  * Given a waitq that is assumed to be embedded within a selinfo structure,
@@ -2668,25 +2669,24 @@ SECURITY_READ_ONLY_EARLY(struct filterops) spec_filtops = {
  * element, this macro simply does the offset_of calculation to get back to a
  * containing struct given the struct type and member name.
  */
-#define selinfo_from_waitq(wq) \
-	qe_element((wq), struct selinfo, si_waitq)
+#define selinfo_from_waitq(wq) qe_element((wq), struct selinfo, si_waitq)
 
 static int
-spec_knote_select_and_link(struct knote *kn)
+spec_knote_select_and_link(struct knote * kn)
 {
 	uthread_t uth;
 	vfs_context_t ctx;
 	vnode_t vp;
-	struct waitq_set *old_wqs;
+	struct waitq_set * old_wqs;
 	uint64_t rsvd, rsvd_arg;
-	uint64_t *rlptr = NULL;
-	struct selinfo *si = NULL;
-	int selres = 0;
+	uint64_t * rlptr    = NULL;
+	struct selinfo * si = NULL;
+	int selres          = 0;
 
 	uth = get_bsdthread_info(current_thread());
 
 	ctx = vfs_context_current();
-	vp = (vnode_t)kn->kn_fp->f_fglob->fg_data;
+	vp  = (vnode_t)kn->kn_fp->f_fglob->fg_data;
 
 	int error = vnode_getwithvid(vp, kn->kn_hookid);
 	if (error != 0) {
@@ -2710,13 +2710,13 @@ spec_knote_select_and_link(struct knote *kn)
 	 * actually do anything!
 	 */
 	rsvd = rsvd_arg = waitq_link_reserve(NULL);
-	rlptr = (void *)&rsvd_arg;
+	rlptr           = (void *)&rsvd_arg;
 
 	/*
 	 * Trick selrecord() into hooking kqueue's wait queue set into the device's
 	 * selinfo wait queue.
 	 */
-	old_wqs = uth->uu_wqset;
+	old_wqs       = uth->uu_wqset;
 	uth->uu_wqset = &(knote_get_kq(kn)->kq_wqs);
 
 	/*
@@ -2740,7 +2740,7 @@ spec_knote_select_and_link(struct knote *kn)
 	 * 5. If there's a `selrecord` and no corresponding `selwakeup`, but the
 	 *    vnode is going away, call `selthreadclear`.
 	 */
-	selres = VNOP_SELECT(vp, knote_get_seltype(kn), 0, rlptr, ctx);
+	selres        = VNOP_SELECT(vp, knote_get_seltype(kn), 0, rlptr, ctx);
 	uth->uu_wqset = old_wqs;
 
 	/*
@@ -2750,7 +2750,7 @@ spec_knote_select_and_link(struct knote *kn)
 	waitq_link_release(rsvd);
 	if (rsvd != rsvd_arg) {
 		/* The driver / handler called selrecord() */
-		struct waitq *wq;
+		struct waitq * wq;
 		memcpy(&wq, rlptr, sizeof(void *));
 
 		/*
@@ -2789,7 +2789,8 @@ spec_knote_select_and_link(struct knote *kn)
 	return selres;
 }
 
-static void filt_spec_common(struct knote *kn, int selres)
+static void
+filt_spec_common(struct knote * kn, int selres)
 {
 	if (kn->kn_vnode_use_ofst) {
 		if (kn->kn_fp->f_fglob->fg_offset >= (uint32_t)selres) {
@@ -2803,7 +2804,7 @@ static void filt_spec_common(struct knote *kn, int selres)
 }
 
 static int
-filt_specattach(struct knote *kn, __unused struct kevent_internal_s *kev)
+filt_specattach(struct knote * kn, __unused struct kevent_internal_s * kev)
 {
 	vnode_t vp;
 	dev_t dev;
@@ -2821,8 +2822,7 @@ filt_specattach(struct knote *kn, __unused struct kevent_internal_s *kev)
 	 * data of 1, indicating that the caller doesn't care about actual
 	 * data counts, just an indication that the device has data.
 	 */
-	if (!kn->kn_vnode_kqok &&
-	    ((kn->kn_sfflags & NOTE_LOWAT) == 0 || kn->kn_sdata != 1)) {
+	if (!kn->kn_vnode_kqok && ((kn->kn_sfflags & NOTE_LOWAT) == 0 || kn->kn_sdata != 1)) {
 		knote_set_error(kn, EINVAL);
 		return 0;
 	}
@@ -2838,16 +2838,16 @@ filt_specattach(struct knote *kn, __unused struct kevent_internal_s *kev)
 		kn->kn_vnode_kqok = 0;
 	}
 
-	kn->kn_filtid = EVFILTID_SPEC;
+	kn->kn_filtid    = EVFILTID_SPEC;
 	kn->kn_hook_data = 0;
-	kn->kn_hookid = vnode_vid(vp);
+	kn->kn_hookid    = vnode_vid(vp);
 
 	knote_markstayactive(kn);
 	return spec_knote_select_and_link(kn);
 }
 
 static void
-filt_specdetach(struct knote *kn)
+filt_specdetach(struct knote * kn)
 {
 	knote_clearstayactive(kn);
 
@@ -2870,7 +2870,7 @@ filt_specdetach(struct knote *kn)
 }
 
 static int
-filt_specevent(struct knote *kn, __unused long hint)
+filt_specevent(struct knote * kn, __unused long hint)
 {
 	/*
 	 * Nothing should call knote or knote_vanish on this knote.
@@ -2880,9 +2880,9 @@ filt_specevent(struct knote *kn, __unused long hint)
 }
 
 static int
-filt_spectouch(struct knote *kn, struct kevent_internal_s *kev)
+filt_spectouch(struct knote * kn, struct kevent_internal_s * kev)
 {
-	kn->kn_sdata = kev->data;
+	kn->kn_sdata   = kev->data;
 	kn->kn_sfflags = kev->fflags;
 
 	if (kev->flags & EV_ENABLE) {
@@ -2893,7 +2893,7 @@ filt_spectouch(struct knote *kn, struct kevent_internal_s *kev)
 }
 
 static int
-filt_specprocess(struct knote *kn, struct filt_process_s *data, struct kevent_internal_s *kev)
+filt_specprocess(struct knote * kn, struct filt_process_s * data, struct kevent_internal_s * kev)
 {
 #pragma unused(data)
 	vnode_t vp;
@@ -2905,7 +2905,7 @@ filt_specprocess(struct knote *kn, struct filt_process_s *data, struct kevent_in
 
 	uth = get_bsdthread_info(current_thread());
 	ctx = vfs_context_current();
-	vp = (vnode_t)kn->kn_fp->f_fglob->fg_data;
+	vp  = (vnode_t)kn->kn_fp->f_fglob->fg_data;
 
 	error = vnode_getwithvid(vp, kn->kn_hookid);
 	if (error != 0) {
@@ -2919,14 +2919,13 @@ filt_specprocess(struct knote *kn, struct filt_process_s *data, struct kevent_in
 
 	vnode_put(vp);
 
-	res = ((kn->kn_sfflags & NOTE_LOWAT) != 0) ?
-		(kn->kn_data >= kn->kn_sdata) : kn->kn_data;
+	res = ((kn->kn_sfflags & NOTE_LOWAT) != 0) ? (kn->kn_data >= kn->kn_sdata) : kn->kn_data;
 
 	if (res) {
 		*kev = kn->kn_kevent;
 		if (kn->kn_flags & EV_CLEAR) {
 			kn->kn_fflags = 0;
-			kn->kn_data = 0;
+			kn->kn_data   = 0;
 		}
 	}
 
@@ -2934,7 +2933,7 @@ filt_specprocess(struct knote *kn, struct filt_process_s *data, struct kevent_in
 }
 
 static int
-filt_specpeek(struct knote *kn)
+filt_specpeek(struct knote * kn)
 {
 	int selres = 0;
 
@@ -2943,4 +2942,3 @@ filt_specpeek(struct knote *kn)
 
 	return kn->kn_data != 0;
 }
-
