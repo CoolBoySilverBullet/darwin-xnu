@@ -211,14 +211,14 @@ struct _throttle_io_info_t {
 	TAILQ_HEAD(, uthread) throttle_uthlist[THROTTLE_LEVEL_END + 1]; /* Lists of throttled uthreads */
 	int throttle_next_wake_level;
 
-	thread_call_t throttle_timer_call;
-	int32_t throttle_timer_ref;
-	int32_t throttle_timer_active;
+	thread_call_t throttle_timer_call; /* 对应 throttle_timer */
+	int32_t throttle_timer_ref;        /* throttle_timer 有关变量 */
+	int32_t throttle_timer_active;     /* throttle_timer 有关变量 */
 
 	int32_t throttle_io_count;
 	int32_t throttle_io_count_begin;
 	int * throttle_io_periods;
-	uint32_t throttle_io_period_num;
+	uint32_t throttle_io_period_num; /* 只在 throttle_timer_start 中改变 */
 
 	int32_t throttle_refcnt;
 	int32_t throttle_alloc;
@@ -1108,9 +1108,11 @@ throttle_timer(struct _throttle_io_info_t * info)
 	elapsed = now;
 	timevalsub(&elapsed, &info->throttle_start_IO_period_timestamp[THROTTLE_LEVEL_THROTTLED]);
 	elapsed_msecs = (uint64_t)elapsed.tv_sec * (uint64_t)1000 + (elapsed.tv_usec / 1000);
+	// ms 毫秒
 
 	if (elapsed_msecs >= (uint64_t)info->throttle_io_periods[THROTTLE_LEVEL_THROTTLED]) {
 		wake_level = info->throttle_next_wake_level;
+		// t1 > 5, wake_level = 3
 
 		for (level = THROTTLE_LEVEL_START; level < THROTTLE_LEVEL_END; level++) {
 			elapsed = now;
@@ -1128,6 +1130,7 @@ throttle_timer(struct _throttle_io_info_t * info)
 				update_io_count = TRUE;
 
 				info->throttle_next_wake_level = wake_level - 1;
+				// t3 > 25, next_wake_level = 2
 
 				if (info->throttle_next_wake_level == THROTTLE_LEVEL_START)
 					info->throttle_next_wake_level = THROTTLE_LEVEL_END;
@@ -1135,6 +1138,7 @@ throttle_timer(struct _throttle_io_info_t * info)
 				break;
 			}
 			wake_level--;
+			// wake_level = 2
 
 			if (wake_level == THROTTLE_LEVEL_START)
 				wake_level = THROTTLE_LEVEL_END;
@@ -1146,6 +1150,7 @@ throttle_timer(struct _throttle_io_info_t * info)
 			TAILQ_REMOVE(&info->throttle_uthlist[wake_level], ut, uu_throttlelist);
 			ut->uu_on_throttlelist = THROTTLE_LEVEL_NONE;
 			ut->uu_is_throttled    = false;
+			// throttle_level_2 队首去除
 
 			wake_address = (caddr_t)&ut->uu_on_throttlelist;
 		}
@@ -1153,6 +1158,7 @@ throttle_timer(struct _throttle_io_info_t * info)
 		wake_level = THROTTLE_LEVEL_START;
 
 	throttle_level = throttle_timer_start(info, update_io_count, wake_level);
+	// info, true, 2
 
 	if (wake_address != NULL)
 		wakeup(wake_address);
@@ -1371,7 +1377,14 @@ int rethrottle_wakeups = 0;
  * 3 - This cannot safely dereference uu_throttle_info, as it may
  *     get deallocated out from under us
  */
-
+// uu_rethrottle_lock 用于将这个函数与 throttle_lowpri_io 同步， throttle_lowpri_io 是一个经过调整的线程阻塞的地方。
+// 该函数将在开始其关于是否需要阻塞的决策过程之前获取这个锁，并在 assert_wait 中持有它。
+// 当线程由于任何原因(计时器或重油门)被唤醒时，它将重新获取 uu_rethrottle_lock，然后再决定现在运行它是否真的没问题。
+// 此时，线程可以进入另一个节流队列，并在节流等待结束后重新阻塞或从节流队列返回，如果节流已将其移出任何当前活动的节流窗口。
+// 注:
+// 1.这可以在持有任务锁时调用。
+// 2.这可以在 kqueue 唤醒路径中禁用抢占和中断时调用，这样我们就不能使用 throttle_lock，它是一个互斥锁
+// 3.这不能安全地解除对 uu_throttle_info 的引用，因为它可能会从我们下面解除引用
 void
 rethrottle_thread(uthread_t ut)
 {
@@ -1384,9 +1397,11 @@ rethrottle_thread(uthread_t ut)
 
 	boolean_t s = ml_set_interrupts_enabled(FALSE);
 	lck_spin_lock(&ut->uu_rethrottle_lock);
+	// 关中断，并锁 uu_rethrottle_lock
 
 	if (!ut->uu_is_throttled)
 		ut->uu_was_rethrottled = true;
+	// 当前线程此时没有被阻塞，仅仅修改uu_was_rethrottled值
 	else {
 		int my_new_level = throttle_get_thread_throttle_level(ut);
 
@@ -1397,6 +1412,7 @@ rethrottle_thread(uthread_t ut)
 			 * and we're changing it's throttle level, so
 			 * we need to wake it up.
 			 */
+			// 当前线程此时正在被阻塞，wakeup原来管控等级
 			ut->uu_is_throttled = false;
 			wakeup(&ut->uu_on_throttlelist);
 
@@ -1407,6 +1423,7 @@ rethrottle_thread(uthread_t ut)
 	}
 	lck_spin_unlock(&ut->uu_rethrottle_lock);
 	ml_set_interrupts_enabled(s);
+	// 解锁 uu_rethrottle_lock，并开中断
 }
 
 /*
@@ -1608,8 +1625,10 @@ throttle_get_thread_throttle_level(uthread_t ut)
 {
 	uthread_t * ut_p = (ut == NULL) ? &ut : NULL;
 	int io_tier      = throttle_get_io_policy(ut_p);
+	//阅读笔记：Returns THROTTLE_LEVEL_* values
 
 	return throttle_get_thread_throttle_level_internal(ut, io_tier);
+	//阅读笔记：如果用户空闲（user_idle_level > 0）时，将tier3 I/O作为tier2发出
 }
 
 /*
@@ -1651,6 +1670,12 @@ throttle_get_thread_throttle_level_internal(uthread_t ut, int io_tier)
  *
  * In-flight I/O is bookended by throttle_info_update_internal/throttle_info_end_io_internal
  */
+// 阅读笔记:
+// 具体被限制的IO，以及IO被限制的条件
+//  - 高优先级的层级有一个活动IO
+//  - 高优先级的层级上一个IO开始或结束经过的时间在 throttle window 时间内
+//
+// 活动IO由 throttle_info_update_internal/throttle_info_end_io_internal 确定
 static int
 throttle_io_will_be_throttled_internal(void * throttle_info, int * mylevel, int * throttling_level)
 {
@@ -1663,12 +1688,15 @@ throttle_io_will_be_throttled_internal(void * throttle_info, int * mylevel, int 
 
 	if ((thread_throttle_level = throttle_get_thread_throttle_level(NULL)) < THROTTLE_LEVEL_THROTTLED)
 		return (THROTTLE_DISENGAGED);
+	// 阅读笔记：当前线程THROTTLE_LEVEL_* values
 
 	microuptime(&now);
+	// 微秒
 
 	for (throttle_level = THROTTLE_LEVEL_START; throttle_level < thread_throttle_level; throttle_level++) {
 		if (info->throttle_inflight_count[throttle_level]) {
 			break;
+			// 阅读笔记：高优先级是否有inflight IO
 		}
 		elapsed = now;
 		timevalsub(&elapsed, &info->throttle_window_start_timestamp[throttle_level]);
@@ -1676,6 +1704,7 @@ throttle_io_will_be_throttled_internal(void * throttle_info, int * mylevel, int 
 
 		if (elapsed_msecs < (uint64_t)throttle_windows_msecs[thread_throttle_level])
 			break;
+		// 阅读笔记：判断在throttle window时间内
 	}
 	if (throttle_level >= thread_throttle_level) {
 		/*
@@ -1687,8 +1716,11 @@ throttle_io_will_be_throttled_internal(void * throttle_info, int * mylevel, int 
 	}
 	if (mylevel)
 		*mylevel = thread_throttle_level;
+	// 阅读笔记：当前IO级别
 	if (throttling_level)
 		*throttling_level = throttle_level;
+	// 阅读笔记：有inflight IO或在throttle window时间的高优先级的IO级别
+	// 一定有 throttling_level < mylevel
 
 	if (info->throttle_io_count != info->throttle_io_count_begin) {
 		/*
@@ -1787,6 +1819,7 @@ throttle_lowpri_io(int sleep_amount)
 		ut->uu_lowpri_window = 0;
 		return (0);
 	}
+	// 阅读笔记：检查是否是throttle IO
 	lck_mtx_lock(&info->throttle_lock);
 	assert(ut->uu_on_throttlelist < THROTTLE_LEVEL_THROTTLED);
 
@@ -1809,6 +1842,7 @@ throttle_lowpri_io(int sleep_amount)
 			if ((info->throttle_io_period_num - throttle_io_period_num) >= (uint32_t)sleep_amount)
 				break;
 		}
+		// 阅读笔记：THROTTLE_ENGAGED 且 info->throttle_io_period_num - throttle_io_period_num >= 1
 		/*
 		 * keep the same position in the list if "rethrottle_thread" changes our throttle level  and
 		 * then puts us back to the original level before we get a chance to run
@@ -1854,6 +1888,7 @@ throttle_lowpri_io(int sleep_amount)
 			KERNEL_DEBUG_CONSTANT((FSDBG_CODE(DBG_FSRW, 97)) | DBG_FUNC_START, throttle_windows_msecs[mylevel],
 			                      info->throttle_io_periods[mylevel], info->throttle_io_count, 0, 0);
 			throttled_count[mylevel]++;
+			// 阅读笔记：第一次 while 循环
 		}
 		ut->uu_wmesg = "throttle_lowpri_io";
 
@@ -1880,6 +1915,7 @@ throttle_lowpri_io(int sleep_amount)
 			insert_tail = FALSE;
 		else if (info->throttle_io_period_num < throttle_io_period_num ||
 		         (info->throttle_io_period_num - throttle_io_period_num) >= (uint32_t)sleep_amount) {
+			// info->throttle_io_period_num 不等于 throttle_io_period_num
 			insert_tail  = FALSE;
 			sleep_amount = 0;
 		}
@@ -1889,6 +1925,7 @@ done:
 		TAILQ_REMOVE(&info->throttle_uthlist[ut->uu_on_throttlelist], ut, uu_throttlelist);
 		ut->uu_on_throttlelist = THROTTLE_LEVEL_NONE;
 	}
+	// 将当前线程从 throttle 队列移除
 	lck_mtx_unlock(&info->throttle_lock);
 
 	if (sleep_cnt) {
@@ -1906,8 +1943,10 @@ done:
 	ut->uu_throttle_info = NULL;
 	ut->uu_throttle_bc   = false;
 	ut->uu_lowpri_window = 0;
+	// 清除throttle标志
 
 	throttle_info_rel(info);
+	// 释放空间
 
 	return (sleep_cnt);
 }

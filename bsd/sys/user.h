@@ -239,12 +239,12 @@ struct uthread {
 	lck_spin_t uu_rethrottle_lock;        /* locks was_rethrottled and is_throttled */
 	TAILQ_ENTRY(uthread) uu_throttlelist; /* List of uthreads currently throttled */
 	void * uu_throttle_info;              /* pointer to throttled I/Os info */
-	int uu_on_throttlelist;
-	int uu_lowpri_window;
+	int uu_on_throttlelist;               /* 当前uu在哪个throttle级别队列中 */
+	int uu_lowpri_window;                 /* 低优先级IO标志 */
 	/* These boolean fields are protected by different locks */
-	bool uu_was_rethrottled;
-	bool uu_is_throttled;
-	bool uu_throttle_bc;
+	bool uu_was_rethrottled; /* was_rethrottled的flag */
+	bool uu_is_throttled;    /* is_throttled的flag */
+	bool uu_throttle_bc;     /* Bootcache misse的IO的flag */
 
 	u_int32_t uu_network_marks; /* network control flow marks */
 
