@@ -225,6 +225,7 @@ struct _throttle_io_info_t {
 	int32_t throttle_disabled;
 	int32_t throttle_is_fusion_with_priority;
 };
+// 针对的是一个设备，或者说一个分区
 
 struct _throttle_io_info_t _throttle_io_info[LOWPRI_MAX_NUM_DEV];
 
@@ -962,9 +963,11 @@ throttle_timer_start(struct _throttle_io_info_t * info, boolean_t update_io_coun
 	if (update_io_count == TRUE) {
 		info->throttle_io_count_begin = info->throttle_io_count;
 		info->throttle_io_period_num++;
+		// 更新 throttle_io_count_begin，然后 throttle_io_period_num++
 
 		while (wakelevel >= THROTTLE_LEVEL_THROTTLED)
 			info->throttle_start_IO_period_timestamp[wakelevel--] = now;
+		// 根据 wakelevel 值重置 throttle_start_IO_period_timestamp[<=wakelevel] = now
 
 		info->throttle_min_timer_deadline = now;
 
@@ -973,6 +976,8 @@ throttle_timer_start(struct _throttle_io_info_t * info, boolean_t update_io_coun
 		period.tv_usec = (msecs % 1000) * 1000;
 
 		timevaladd(&info->throttle_min_timer_deadline, &period);
+		// 重新计算 throttle_min_timer_deadline = now + 5
+	
 	}
 	for (throttle_level = THROTTLE_LEVEL_START; throttle_level < THROTTLE_LEVEL_END; throttle_level++) {
 		elapsed = now;
@@ -986,6 +991,7 @@ throttle_timer_start(struct _throttle_io_info_t * info, boolean_t update_io_coun
 					 * we had an I/O occur at a higher priority tier within
 					 * this tier's throttle window
 					 */
+					// 当前经过时间 (now - throttle_window_start_timestamp) 超过高层的 throttle_windows_msecs
 					throttled = TRUE;
 				}
 				/*
@@ -1024,12 +1030,15 @@ throttle_timer_start(struct _throttle_io_info_t * info, boolean_t update_io_coun
 			timevaladd(&target, &period);
 
 			if (need_timer == FALSE || timevalcmp(&target, &min_target, <)) {
+				// target < min_target ?
 				min_target = target;
 				need_timer = TRUE;
 			}
 		}
 		if (timevalcmp(&info->throttle_min_timer_deadline, &now, >)) {
+			// throttle_min_timer_deadline > now ?
 			if (timevalcmp(&info->throttle_min_timer_deadline, &min_target, >))
+				// throttle_min_timer_deadline > min_target ?
 				min_target = info->throttle_min_timer_deadline;
 		}
 
@@ -1108,7 +1117,7 @@ throttle_timer(struct _throttle_io_info_t * info)
 	elapsed = now;
 	timevalsub(&elapsed, &info->throttle_start_IO_period_timestamp[THROTTLE_LEVEL_THROTTLED]);
 	elapsed_msecs = (uint64_t)elapsed.tv_sec * (uint64_t)1000 + (elapsed.tv_usec / 1000);
-	// ms 毫秒
+	// 当前时刻与 throttle_start_IO_period_timestamp 相减，ms 毫秒
 
 	if (elapsed_msecs >= (uint64_t)info->throttle_io_periods[THROTTLE_LEVEL_THROTTLED]) {
 		wake_level = info->throttle_next_wake_level;
@@ -1153,6 +1162,7 @@ throttle_timer(struct _throttle_io_info_t * info)
 			// throttle_level_2 队首去除
 
 			wake_address = (caddr_t)&ut->uu_on_throttlelist;
+			// wake_address = &(-1)?
 		}
 	} else
 		wake_level = THROTTLE_LEVEL_START;
@@ -1165,6 +1175,7 @@ throttle_timer(struct _throttle_io_info_t * info)
 
 	for (level = THROTTLE_LEVEL_THROTTLED; level <= throttle_level; level++) {
 		TAILQ_FOREACH_SAFE(ut, &info->throttle_uthlist[level], uu_throttlelist, utlist)
+		// ut 遍历 
 		{
 			TAILQ_REMOVE(&info->throttle_uthlist[level], ut, uu_throttlelist);
 			ut->uu_on_throttlelist = THROTTLE_LEVEL_NONE;
@@ -2055,6 +2066,7 @@ throttle_info_end_io_internal(struct _throttle_io_info_t * info, int throttle_le
 	microuptime(&info->throttle_window_start_timestamp[throttle_level]);
 	OSDecrementAtomic(&info->throttle_inflight_count[throttle_level]);
 	assert(info->throttle_inflight_count[throttle_level] >= 0);
+	// 更新throttle_window_start_timestamp， throttle_inflight_count--
 }
 
 /*
