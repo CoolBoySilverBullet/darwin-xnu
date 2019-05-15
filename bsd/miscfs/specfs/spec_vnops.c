@@ -1723,7 +1723,7 @@ throttle_io_will_be_throttled_internal(void * throttle_info, int * mylevel, int 
 		 * that affect the throttle level of this thread,
 		 * so go ahead and treat as normal I/O
 		 */
-		return (THROTTLE_DISENGAGED);
+		return (THROTTLE_DISENGAGED);//0
 	}
 	if (mylevel)
 		*mylevel = thread_throttle_level;
@@ -1738,13 +1738,13 @@ throttle_io_will_be_throttled_internal(void * throttle_info, int * mylevel, int 
 		 * we've already issued at least one throttleable I/O
 		 * in the current I/O window, so avoid issuing another one
 		 */
-		return (THROTTLE_NOW);
+		return (THROTTLE_NOW);//2
 	}
 	/*
 	 * we're in the throttle window, so
 	 * cut the I/O size back
 	 */
-	return (THROTTLE_ENGAGED);
+	return (THROTTLE_ENGAGED);//1
 }
 
 /*
@@ -1975,6 +1975,7 @@ throttle_set_thread_io_policy(int policy)
 {
 	proc_set_thread_policy(current_thread(), TASK_POLICY_INTERNAL, TASK_POLICY_IOPOL, policy);
 }
+// 设置IO Policy
 
 int
 throttle_get_thread_effective_io_policy()
